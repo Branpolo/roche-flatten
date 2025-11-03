@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Output directories
+/output_data/
+/flatten/output_data/
+
+# Database files
+readings.db
+*.db
+
+# Input data
+/flatten/input/
+
+# Backup and temporary files
+/backup/
+/test_output/
+/tmp/
+/feedback_plots/
+/plots/
+/plots_made/
+
+# Claude Code
+/.claude/
+/.playwright-mcp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
