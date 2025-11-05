@@ -133,8 +133,8 @@ def main():
         description='Update EmbedCT and EmbedRFU from Roche embed CSV file'
     )
     parser.add_argument('--db',
-                       default='/home/azureuser/code/wssvc-flow/readings.db',
-                       help='Path to SQLite database file')
+                       default='~/dbs/readings.db',
+                       help='Path to SQLite database file (default: ~/dbs/readings.db)')
     parser.add_argument('--csv',
                        default='flatten/input/roche_wssvc_embed.csv',
                        help='Path to CSV file with embed data')

@@ -7,7 +7,7 @@ import os
 
 def create_database():
     csv_file = '/home/azureuser/code/wssvc-flow/data-4thAug2025-for_neg_filter.csv'
-    db_file = '/home/azureuser/code/wssvc-flow/readings.db'
+    db_file = os.path.expanduser('~/dbs/readings.db')
     
     # Remove existing database
     if os.path.exists(db_file):

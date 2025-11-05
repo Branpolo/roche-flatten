@@ -5,9 +5,10 @@ Prepare test_data table by adding required columns for CUSUM processing.
 
 import sqlite3
 import sys
+import os
 
 def prepare_test_data():
-    db_file = '/home/azureuser/code/wssvc-flow/readings.db'
+    db_file = os.path.expanduser('~/dbs/readings.db')
 
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()

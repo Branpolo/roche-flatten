@@ -322,8 +322,8 @@ def main():
                       help='Generate PCRAI for all unique filenames in database')
     group.add_argument('--files', type=str,
                       help='Generate PCRAI for specific files (comma-separated)')
-    parser.add_argument('--db', type=str, default="/home/azureuser/code/wssvc-flow/readings.db",
-                       help='Path to database file')
+    parser.add_argument('--db', type=str, default="~/dbs/readings.db",
+                       help='Path to database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', type=str, default="output_data",
                        help='Output directory for PCRAI files')
     parser.add_argument('--table', type=str, default='flatten',

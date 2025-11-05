@@ -115,7 +115,7 @@ python3 flatten/generate_database_flattened_html_fixed.py
 - `--remove [id1,id2,...]`: Remove IDs from the example dataset
 - `--list`: List all current example IDs (default action)
 - `--validate`: Check if IDs exist in readings table before adding
-- `--db [path]`: Path to database file (default: readings.db)
+- `--db [path]`: Path to database file (default: ~/dbs/readings.db)
 
 **Usage Examples**:
 ```bash
@@ -139,7 +139,7 @@ python3 flatten/manage_example_ids.py --remove 500,600
 **Parameters**:
 - `--all`: Generate PCRAI for all unique filenames in database
 - `--files [file1,file2,...]`: Generate PCRAI for specific files
-- `--db [path]`: Custom database path (default: readings.db)
+- `--db [path]`: Custom database path (default: ~/dbs/readings.db)
 - `--output [dir]`: Output directory (default: output_data)
 
 **Usage Examples**:
@@ -292,7 +292,7 @@ All Python scripts support a standardized set of command line parameters for con
 ### Core Parameters
 
 #### Data Source Parameters
-- **`--db [path]`**: Path to SQLite database file (default: readings.db)
+- **`--db [path]`**: Path to SQLite database file (default: ~/dbs/readings.db)
 - **`--output [directory]`**: Output directory for generated files (default: output_data)
 
 #### Record Selection Parameters

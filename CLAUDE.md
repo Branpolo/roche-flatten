@@ -18,7 +18,7 @@ This repository contains CUSUM analysis and curve flattening tools for PCR time-
 
 **Purpose**: CUSUM analysis and curve flattening for time series data
 - **Active scripts**: `apply_corrected_cusum_all.py`, `create_flattened_database_fast.py`, `compare_k_parameters.py`, `generate_flattened_cusum_html.py`, etc.
-- **Database**: `/home/azureuser/code/wssvc-flow/readings.db` (or custom path)
+- **Database**: `~/dbs/readings.db` (or custom path)
 - **Output**: Flattened curves, PCRAI files, HTML visualizations
 - **Documentation**: `flatten/docs/`
 

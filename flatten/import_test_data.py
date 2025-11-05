@@ -11,7 +11,7 @@ import os
 
 def import_test_data():
     csv_file = '/home/azureuser/code/wssvc-flow-codex/flatten/input/test_wssvc_2025-10-25.csv'
-    db_file = '/home/azureuser/code/wssvc-flow/readings.db'
+    db_file = os.path.expanduser('~/dbs/readings.db')
 
     if not os.path.exists(csv_file):
         print(f"ERROR: CSV file not found: {csv_file}")

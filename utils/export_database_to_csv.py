@@ -308,8 +308,8 @@ def main():
     parser = argparse.ArgumentParser(description='Export database data to CSV format')
     
     # Standard flags from flags_table.md - applicable ones
-    parser.add_argument('--db', type=str, default="/home/azureuser/code/wssvc-flow/readings.db",
-                       help='Path to database file (default: /home/azureuser/code/wssvc-flow/readings.db)')
+    parser.add_argument('--db', type=str, default="~/dbs/readings.db",
+                       help='Path to database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', type=str, default="database_export.csv",
                        help='Output CSV file path (default: database_export.csv)')
     parser.add_argument('--ids', type=str, 

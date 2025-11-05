@@ -5,7 +5,7 @@
 ### From `generate_pcrai_from_db.py`:
 - `--all` (action='store_true') - Generate PCRAI for all unique filenames
 - `--files` (str) - Generate PCRAI for specific files (comma-separated)  
-- `--db` (str, default="/home/azureuser/code/wssvc-flow/readings.db") - Path to database file
+- `--db` (str, default="~/dbs/readings.db") - Path to database file
 - `--output` (str, default="output_data") - Output directory for PCRAI files
 
 ### From `compare_k_parameters.py`:

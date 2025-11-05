@@ -47,8 +47,8 @@ def process_readings_with_corrected_algorithm(readings, k=0.0):
 
 def main():
     parser = argparse.ArgumentParser(description='Apply corrected CUSUM algorithm to readings')
-    parser.add_argument('--db', type=str, default="/home/azureuser/code/wssvc-flow/readings.db",
-                       help='Path to database file (default: /home/azureuser/code/wssvc-flow/readings.db)')
+    parser.add_argument('--db', type=str, default="~/dbs/readings.db",
+                       help='Path to database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', type=str, default="output_data",
                        help='Output directory for any generated files (default: output_data)')
     parser.add_argument('--cusum-limit', type=float, default=-10,

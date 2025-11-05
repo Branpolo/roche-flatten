@@ -587,8 +587,8 @@ def main():
                        help='Sort order: "down" = high to low (-3 before -300), "up" = low to high (-300 before -3) (default: down)')
     parser.add_argument('--sort-by', choices=['cusum', 'db-cusum', 'id'], default='cusum',
                        help='Sort by: "cusum" = calculated CUSUM values, "db-cusum" = database CUSUM (fast), "id" = record ID (default: cusum)')
-    parser.add_argument('--db', type=str, default="/home/azureuser/code/wssvc-flow/readings.db",
-                       help='Path to database file (default: /home/azureuser/code/wssvc-flow/readings.db)')
+    parser.add_argument('--db', type=str, default="~/dbs/readings.db",
+                       help='Path to database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', type=str, default="output_data",
                        help='Output directory for HTML files (default: output_data)')
     parser.add_argument('--sanity-check-slope', action='store_true',

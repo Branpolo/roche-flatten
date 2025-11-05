@@ -39,8 +39,8 @@ def get_example_ids(conn):
 
 def main():
     parser = argparse.ArgumentParser(description='Create flattened database for CUSUM analysis')
-    parser.add_argument('--db', type=str, default="/home/azureuser/code/wssvc-flow/readings.db",
-                       help='Path to database file (default: /home/azureuser/code/wssvc-flow/readings.db)')
+    parser.add_argument('--db', type=str, default="~/dbs/readings.db",
+                       help='Path to database file (default: ~/dbs/readings.db)')
     parser.add_argument('--cusum-limit', type=float, default=-80,
                        help='CUSUM threshold for flattening (default: -80)')
     parser.add_argument('--ids', type=str,
