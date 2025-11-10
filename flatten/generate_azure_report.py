@@ -456,7 +456,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
             {control_polylines}
 
             <!-- Main sample curve -->
-            <polyline points="{main_polyline}" fill="none" stroke="{main_color}" stroke-width="2"/>
+            <polyline points="{main_polyline}" fill="none" stroke="{main_color}" stroke-width="2" class="main-curve"/>
 
             <!-- Y-axis labels -->
             <text x="{margin-5}" y="{margin+5}" text-anchor="end" font-size="10" fill="#666">{max_reading:.0f}</text>
@@ -625,16 +625,26 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
 
             // Rescale SVG y-axis based on visible curves
             function rescaleYAxis(svg, showControls) {
-                // Get all visible polylines
-                const visiblePolylines = svg.querySelectorAll('polyline:not(.hidden)');
+                // SVG plot area constants (must match Python generation: margin=30, height=180)
+                const plotYTop = 30;
+                const plotYBottom = 150;
+                const plotHeight = plotYBottom - plotYTop;
 
-                // If no visible polylines or controls are hidden, reset to normal scale
-                if (visiblePolylines.length === 0 || !showControls) {
-                    svg.style.transform = 'scaleY(1)';
+                // If controls are hidden, reset to normal - don't apply any scaling transform
+                if (!showControls) {
+                    svg.style.transform = 'none';
                     return;
                 }
 
-                // Extract Y values from all visible polylines (in current SVG coordinates)
+                // If controls are shown, use all visible polylines (main + controls) to calculate scale
+                const visiblePolylines = svg.querySelectorAll('polyline:not(.hidden)');
+
+                if (visiblePolylines.length === 0) {
+                    svg.style.transform = 'none';
+                    return;
+                }
+
+                // Extract Y values from all visible polylines
                 let allYValues = [];
                 visiblePolylines.forEach(line => {
                     const points = line.getAttribute('points');
@@ -645,28 +655,24 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                 });
 
                 if (allYValues.length === 0) {
-                    svg.style.transform = 'scaleY(1)';
+                    svg.style.transform = 'none';
                     return;
                 }
 
-                // Find min/max in current SVG space (30-150)
+                // Find min/max in current SVG space
                 const minYSvg = Math.min(...allYValues);
                 const maxYSvg = Math.max(...allYValues);
-
-                // SVG plot area constants
-                const plotYTop = 30;
-                const plotYBottom = 150;
-                const plotHeight = plotYBottom - plotYTop;
 
                 // Calculate span of visible data with 10% padding
                 const dataSpan = maxYSvg - minYSvg;
                 const padding = dataSpan * 0.1;
                 const totalSpan = dataSpan + (padding * 2);
 
-                // Calculate scale factor (how much to expand)
+                // Calculate scale factor
                 const scaleFactor = plotHeight / totalSpan;
 
-                // Apply CSS transform to zoom the SVG plot area
+                // Apply CSS transform only when showing controls
+                // This zooms the entire SVG to fit all visible data
                 svg.style.transformOrigin = `${plotYTop}px ${plotYTop}px`;
                 svg.style.transform = `scaleY(${scaleFactor})`;
             }
