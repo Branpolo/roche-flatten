@@ -110,6 +110,76 @@ def get_control_curves(conn, file_uid, mix, mixtarget, control_samples, is_posit
     return controls
 
 
+def get_sample_detail_records(conn, sample_ids):
+    """
+    Get all records for specified samples with Azure and Embed results.
+
+    For sample details mode: Show ALL targets including IC, grouped by Mix/MixTarget.
+    Skip E1, E2 targets. Include File info for run identification.
+
+    Args:
+        conn: Database connection
+        sample_ids: List of sample IDs to retrieve
+
+    Returns:
+        List of tuples: (id, Sample, File, Mix, MixTarget, Target, AzureCls, AzureCFD,
+                        EmbedCls, EmbedCt, source_table)
+    """
+    cursor = conn.cursor()
+
+    # Convert sample IDs to string list for SQL
+    sample_list = ', '.join([f"'{s}'" for s in sample_ids])
+
+    # Query both tables with all targets (including IC), skip E1/E2
+    cursor.execute(f"""
+    SELECT * FROM (
+        SELECT
+            id,
+            Sample,
+            File,
+            Mix,
+            MixTarget,
+            Target,
+            AzureCls,
+            AzureCFD,
+            EmbedCls,
+            EmbedCt,
+            'readings' as source_table
+        FROM readings
+        WHERE Sample IN ({sample_list})
+          AND in_use = 1
+          AND MixTarget NOT IN ('E1', 'E2')
+
+        UNION ALL
+
+        SELECT
+            id,
+            Sample,
+            File,
+            Mix,
+            MixTarget,
+            Target,
+            AzureCls,
+            AzureCFD,
+            EmbedCls,
+            EmbedCt,
+            'test_data' as source_table
+        FROM test_data
+        WHERE Sample IN ({sample_list})
+          AND in_use = 1
+          AND MixTarget NOT IN ('E1', 'E2')
+    )
+    ORDER BY
+        Sample,
+        File,
+        Mix,
+        MixTarget,
+        Target
+    """)
+
+    return cursor.fetchall()
+
+
 def get_azure_records(conn, include_ic=False, compare_embed=False):
     """
     Get all records with Azure classification results from BOTH readings and test_data.
@@ -322,7 +392,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
             polyline = generate_polyline(ctrl_readings)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#3498db" stroke-width="1.5"
-                      stroke-dasharray="5,3" class="control-curve" data-control-type="positive"/>
+                      stroke-dasharray="5,3" class="control-curve hidden" data-control-type="positive"/>
             '''
         legend_items.append('<span style="color:#3498db;">━━ Pos Ctrl</span>')
 
@@ -332,7 +402,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
             polyline = generate_polyline(ctrl_readings)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#95a5a6" stroke-width="1.5"
-                      stroke-dasharray="2,2" class="control-curve" data-control-type="negative"/>
+                      stroke-dasharray="2,2" class="control-curve hidden" data-control-type="negative"/>
             '''
         legend_items.append('<span style="color:#95a5a6;">··· Neg Ctrl</span>')
 
@@ -401,7 +471,423 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     return svg
 
 
-def generate_html_report(conn, records, output_file, show_cfd=False, compare_embed=False):
+def generate_sample_details_report(conn, records, output_file, show_cfd=False, scale_y_axis=True):
+    """
+    Generate HTML report for sample details mode.
+
+    Shows all targets for specified samples with both Azure and Embed results side-by-side.
+    Organized by Sample → Mix → MixTarget.
+
+    Args:
+        conn: Database connection
+        records: List of records from get_sample_detail_records
+        output_file: Output HTML file path
+        show_cfd: Show confidence values
+        scale_y_axis: Rescale y-axis when toggling controls (default: True)
+    """
+
+    html_content = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Sample Details Report</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 10px;
+                background-color: #f5f5f5;
+            }
+            .container {
+                display: grid;
+                grid-template-columns: repeat(5, 1fr);
+                gap: 8px;
+                max-width: 1400px;
+                margin: 0 auto;
+            }
+            .graph-container {
+                background: white;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 4px;
+                text-align: center;
+            }
+            .graph-header {
+                font-size: 10px;
+                margin-bottom: 4px;
+                color: #333;
+                font-weight: bold;
+            }
+            .result-overlay {
+                font-size: 9px;
+                margin-top: 4px;
+                padding: 4px;
+                background: #ecf0f1;
+                border-radius: 3px;
+                text-align: center;
+            }
+            .result-overlay .label {
+                font-weight: bold;
+                color: #2c3e50;
+            }
+            .result-overlay .azure {
+                color: #3498db;
+            }
+            .result-overlay .embed {
+                color: #e67e22;
+            }
+            .header {
+                text-align: center;
+                margin: 20px 0;
+            }
+            h1 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 30px 0 20px 0;
+                padding: 20px;
+                background: #2c3e50;
+                color: white;
+                border-radius: 8px;
+                font-size: 1.8em;
+            }
+            h2 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 20px 0 15px 0;
+                padding: 15px;
+                background: #34495e;
+                color: white;
+                border-radius: 8px;
+                font-size: 1.4em;
+            }
+            h3 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 15px 0 10px 0;
+                padding: 12px;
+                background: #7f8c8d;
+                color: white;
+                border-radius: 6px;
+                font-size: 1.2em;
+            }
+            h4 {
+                grid-column: 1 / -1;
+                text-align: left;
+                margin: 10px 0 8px 20px;
+                padding: 8px 15px;
+                background: #95a5a6;
+                color: white;
+                border-radius: 4px;
+                font-size: 1.0em;
+            }
+            .toggle-controls-btn {
+                position: absolute;
+                right: 20px;
+                top: 50%;
+                transform: translateY(-50%);
+                background: #ecf0f1;
+                color: #2c3e50;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.8em;
+                font-weight: normal;
+            }
+            .toggle-controls-btn:hover {
+                background: #bdc3c7;
+            }
+            .control-curve.hidden {
+                display: none;
+            }
+            .stats {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 10px 0;
+                padding: 10px;
+                background: #ecf0f1;
+                border-radius: 4px;
+                color: #2c3e50;
+            }
+        </style>
+        <script>
+            // Extract numeric coordinates from polyline points string
+            function extractYValues(pointsStr) {
+                const points = pointsStr.split(' ');
+                const yValues = [];
+                points.forEach(point => {
+                    const coords = point.split(',');
+                    if (coords.length === 2) {
+                        yValues.push(parseFloat(coords[1]));
+                    }
+                });
+                return yValues;
+            }
+
+            // Rescale SVG y-axis based on visible curves
+            function rescaleYAxis(svg, showControls) {
+                // Get all visible polylines
+                const visiblePolylines = svg.querySelectorAll('polyline:not(.hidden)');
+
+                // If no visible polylines or controls are hidden, reset to normal scale
+                if (visiblePolylines.length === 0 || !showControls) {
+                    svg.style.transform = 'scaleY(1)';
+                    return;
+                }
+
+                // Extract Y values from all visible polylines (in current SVG coordinates)
+                let allYValues = [];
+                visiblePolylines.forEach(line => {
+                    const points = line.getAttribute('points');
+                    if (points) {
+                        const yValues = extractYValues(points);
+                        allYValues = allYValues.concat(yValues);
+                    }
+                });
+
+                if (allYValues.length === 0) {
+                    svg.style.transform = 'scaleY(1)';
+                    return;
+                }
+
+                // Find min/max in current SVG space (30-150)
+                const minYSvg = Math.min(...allYValues);
+                const maxYSvg = Math.max(...allYValues);
+
+                // SVG plot area constants
+                const plotYTop = 30;
+                const plotYBottom = 150;
+                const plotHeight = plotYBottom - plotYTop;
+
+                // Calculate span of visible data with 10% padding
+                const dataSpan = maxYSvg - minYSvg;
+                const padding = dataSpan * 0.1;
+                const totalSpan = dataSpan + (padding * 2);
+
+                // Calculate scale factor (how much to expand)
+                const scaleFactor = plotHeight / totalSpan;
+
+                // Apply CSS transform to zoom the SVG plot area
+                svg.style.transformOrigin = `${plotYTop}px ${plotYTop}px`;
+                svg.style.transform = `scaleY(${scaleFactor})`;
+            }
+
+            function toggleControls(sectionId, scaleYAxis = true) {
+                const section = document.getElementById(sectionId);
+                if (!section) {
+                    console.error('Section not found:', sectionId);
+                    return;
+                }
+
+                // Get all control curves in this section
+                const curves = section.querySelectorAll('.control-curve');
+                const legends = section.querySelectorAll('.graph-legend');
+                const svgs = section.querySelectorAll('svg');
+
+                // Find the button - it's in the previous h4 sibling
+                const h4 = section.previousElementSibling;
+                const btn = h4 ? h4.querySelector('.toggle-controls-btn') : null;
+
+                const isHidden = curves.length > 0 && curves[0].classList.contains('hidden');
+
+                curves.forEach(curve => {
+                    if (isHidden) {
+                        curve.classList.remove('hidden');
+                    } else {
+                        curve.classList.add('hidden');
+                    }
+                });
+
+                legends.forEach(legend => {
+                    legend.style.display = isHidden ? 'block' : 'none';
+                });
+
+                // Rescale Y-axis if enabled
+                if (scaleYAxis) {
+                    svgs.forEach(svg => {
+                        rescaleYAxis(svg, !isHidden);
+                    });
+                }
+
+                if (btn) {
+                    btn.textContent = isHidden ? 'Hide Controls' : 'Show Controls';
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <script>
+            // Global setting for y-axis scaling
+            const SCALE_Y_AXIS_ON_TOGGLE = {scale_y_axis_flag};
+        </script>
+        <div class="header">
+            <h1>Sample Details Report</h1>
+            <p style="color: #666;">All targets (including IC) with Azure (DXAI) and Machine (Embed) classifications</p>
+            <p style="color: #999; font-size: 0.9em;">Control curves: <span style="color:#3498db;">━━ Positive</span> | <span style="color:#95a5a6;">··· Negative</span></p>
+        </div>
+        <div class="container">
+    '''
+
+    # Track current grouping
+    current_sample = None
+    current_mix = None
+    current_mixtarget = None
+    section_counter = 0
+
+    # Classification labels
+    cls_labels = {
+        0: 'NEG',
+        1: 'POS',
+        2: 'EQUIV'
+    }
+
+    print(f"Generating sample details report for {len(records)} records...")
+
+    current_file = None
+    for record in tqdm(records, desc="Processing records"):
+        rec_id, sample, file, mix, mixtarget, target, azure_cls, azure_cfd, embed_cls, embed_ct, source_table = record
+
+        # Add Sample header (h2) when sample changes
+        if sample != current_sample:
+            html_content += f'''
+            <h2>Sample: {sample}</h2>
+            '''
+            current_sample = sample
+            current_file = None
+            current_mix = None
+            current_mixtarget = None
+
+        # Add File/Run header (h3) when file changes (for duplicate runs)
+        if file != current_file:
+            html_content += f'''
+            <h3>Run: {file}</h3>
+            '''
+            current_file = file
+            current_mix = None
+            current_mixtarget = None
+
+        # Add Mix header (h3) when it changes
+        if mix != current_mix:
+            html_content += f'''
+            <h3>Mix: {mix}</h3>
+            '''
+            current_mix = mix
+            current_mixtarget = None
+
+        # Add MixTarget header (h4) when it changes
+        if mixtarget != current_mixtarget:
+            section_counter += 1
+            section_id = f'section_{section_counter}'
+            html_content += f'''
+            <h4 style="position: relative;">
+                Target: {mixtarget}
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+            </h4>
+            <div id="{section_id}" style="display: contents;">
+            '''
+            current_mixtarget = mixtarget
+
+        # Get readings and generate graph
+        try:
+            readings = get_readings_for_id(conn, rec_id, source_table)
+            if readings:
+                # Get control curves - generic controls for this mix/target (not file-specific)
+                cursor = conn.cursor()
+                readings_columns = [f"readings{i}" for i in range(44)]
+                readings_select = ", ".join(readings_columns)
+
+                # Positive controls
+                pos_controls = []
+                cursor.execute(f"""
+                    SELECT Sample, {readings_select}
+                    FROM test_data
+                    WHERE Mix = ? AND MixTarget = ? AND (UPPER(Sample) LIKE 'POS%')
+                    AND in_use = 1
+                    LIMIT 3
+                """, (mix, mixtarget))
+                for row in cursor.fetchall():
+                    sample_name = row[0]
+                    ctrl_readings = [r for r in row[1:] if r is not None]
+                    if ctrl_readings:
+                        pos_controls.append((sample_name, ctrl_readings))
+                pos_controls = pos_controls if pos_controls else None
+
+                # Negative controls
+                neg_controls = []
+                cursor.execute(f"""
+                    SELECT Sample, {readings_select}
+                    FROM test_data
+                    WHERE Mix = ? AND MixTarget = ? AND (UPPER(Sample) LIKE 'NTC%' OR UPPER(Sample) LIKE 'NPC%' OR UPPER(Sample) LIKE 'NEG%')
+                    AND in_use = 1
+                    LIMIT 3
+                """, (mix, mixtarget))
+                for row in cursor.fetchall():
+                    sample_name = row[0]
+                    ctrl_readings = [r for r in row[1:] if r is not None]
+                    if ctrl_readings:
+                        neg_controls.append((sample_name, ctrl_readings))
+                neg_controls = neg_controls if neg_controls else None
+
+                # Format result labels
+                azure_label = cls_labels.get(azure_cls, 'N/A') if azure_cls is not None else 'N/A'
+                embed_label = cls_labels.get(embed_cls, 'N/A') if embed_cls is not None else 'N/A'
+                embed_ct_str = f"({embed_ct:.2f})" if embed_ct is not None else ""
+
+                # Enhanced metadata with both results in header
+                metadata = {
+                    'AzureCls': azure_cls,
+                    'AzureCFD': azure_cfd,
+                    'EmbedCls': embed_cls,
+                    'EmbedCt': embed_ct,
+                    'Sample': sample,
+                    'File': file,
+                    'Tube': mixtarget,
+                    'Target': target
+                }
+
+                svg_graph = generate_svg_graph(rec_id, readings, metadata, show_cfd=show_cfd,
+                                              pos_controls=pos_controls,
+                                              neg_controls=neg_controls,
+                                              show_machine_result=False)
+
+                # Modify SVG graph header to include results instead of separate div
+                # Find and replace the graph-header to include results
+                graph_header = f"{sample} | {file[:12]}... | {mixtarget}"
+                result_label = f" | Azure: {azure_label} | Embed: {embed_label}{' '+embed_ct_str if embed_ct_str else ''}"
+
+                svg_graph = svg_graph.replace(
+                    f'<div class="graph-header">\n            {graph_header}\n        </div>',
+                    f'<div class="graph-header">\n            {graph_header}{result_label}\n        </div>'
+                )
+
+                html_content += svg_graph
+
+        except Exception as e:
+            print(f"Error processing record {rec_id} from {source_table}: {e}")
+            continue
+
+    # Close last section div
+    html_content += '</div>\n'
+
+    # Close HTML
+    html_content += '''
+        </div>
+    </body>
+    </html>
+    '''
+
+    # Replace flag placeholder with actual value
+    scale_y_axis_str = 'true' if scale_y_axis else 'false'
+    html_content = html_content.replace('{scale_y_axis_flag}', scale_y_axis_str)
+
+    # Write file
+    with open(output_file, 'w') as f:
+        f.write(html_content)
+
+    print(f"\nHTML report generated: {output_file}")
+    print(f"Total records: {len(records)}")
+
+
+def generate_html_report(conn, records, output_file, show_cfd=False, compare_embed=False, scale_y_axis=True):
     """
     Generate HTML report organized by Mix, MixTarget, and classification.
 
@@ -412,6 +898,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         show_cfd: Show confidence values
         compare_embed: If True, group by comparison categories (DISCREPANT/EQUIVOCAL/AGREED)
                       instead of just AzureCls
+        scale_y_axis: Rescale y-axis when toggling controls (default: True)
     """
 
     html_content = '''
@@ -546,7 +1033,67 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
             }
         </style>
         <script>
-            function toggleControls(sectionId) {
+            // Helper function to extract Y values from SVG polyline points
+            function extractYValues(pointsStr) {
+                const points = pointsStr.split(' ');
+                const yValues = [];
+                points.forEach(point => {
+                    const coords = point.split(',');
+                    if (coords.length === 2) {
+                        yValues.push(parseFloat(coords[1]));
+                    }
+                });
+                return yValues;
+            }
+
+            // Rescale y-axis to fit visible curves using CSS transform
+            function rescaleYAxis(svg, showControls) {
+                const polylines = svg.querySelectorAll('polyline:not(.hidden)');
+
+                // If no visible polylines or controls are hidden, reset to normal scale
+                if (polylines.length === 0 || !showControls) {
+                    svg.style.transform = 'scaleY(1)';
+                    return;
+                }
+
+                // Extract all Y values from visible polylines
+                let allYValues = [];
+                polylines.forEach(line => {
+                    const points = line.getAttribute('points');
+                    if (points) {
+                        const yValues = extractYValues(points);
+                        allYValues = allYValues.concat(yValues);
+                    }
+                });
+
+                if (allYValues.length === 0) {
+                    svg.style.transform = 'scaleY(1)';
+                    return;
+                }
+
+                // Find min/max in current SVG space (30-150)
+                const minYSvg = Math.min(...allYValues);
+                const maxYSvg = Math.max(...allYValues);
+
+                // SVG plot area constants
+                const plotYTop = 30;
+                const plotYBottom = 150;
+                const plotHeight = plotYBottom - plotYTop;
+
+                // Calculate span of visible data with 10% padding
+                const dataSpan = maxYSvg - minYSvg;
+                const padding = dataSpan * 0.1;
+                const totalSpan = dataSpan + (padding * 2);
+
+                // Calculate scale factor (how much to expand)
+                const scaleFactor = plotHeight / totalSpan;
+
+                // Apply CSS transform to zoom the SVG plot area
+                svg.style.transformOrigin = `${plotYTop}px ${plotYTop}px`;
+                svg.style.transform = `scaleY(${scaleFactor})`;
+            }
+
+            function toggleControls(sectionId, scaleYAxis = true) {
                 const section = document.getElementById(sectionId);
                 const curves = section.querySelectorAll('.control-curve');
                 const legends = section.querySelectorAll('.graph-legend');
@@ -569,6 +1116,14 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 if (btn) {
                     btn.textContent = isHidden ? 'Hide Controls' : 'Show Controls';
                 }
+
+                // Rescale Y-axis if enabled
+                if (scaleYAxis) {
+                    const svg = section.querySelector('svg');
+                    if (svg) {
+                        rescaleYAxis(svg, !isHidden);
+                    }
+                }
             }
 
             function toggleCategory(categoryId) {
@@ -586,6 +1141,10 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         </script>
     </head>
     <body>
+        <script>
+            // Global setting for y-axis scaling
+            const SCALE_Y_AXIS_ON_TOGGLE = {scale_y_axis_flag};
+        </script>
         <div class="header">
             <h1 class="report-title">Azure Classification Report</h1>
             <p style="color: #666;">Original curves from readings + test_data tables, organized by Mix, Target, and Classification</p>
@@ -704,7 +1263,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}')">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -752,7 +1311,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 {cls_label}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}')">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -843,6 +1402,10 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
     </html>
     '''
 
+    # Replace flag placeholder with actual value
+    scale_y_axis_str = 'true' if scale_y_axis else 'false'
+    html_content = html_content.replace('{scale_y_axis_flag}', scale_y_axis_str)
+
     # Write file
     with open(output_file, 'w') as f:
         f.write(html_content)
@@ -869,6 +1432,10 @@ def main():
                        help='Include IC (internal control) targets in the report (default: excluded)')
     parser.add_argument('--compare-embed', action='store_true',
                        help='Group results by comparison between Azure and embedded machine classifications (DISCREPANT/EQUIVOCAL/AGREED)')
+    parser.add_argument('--sample-details', nargs='+', type=int,
+                       help='Generate sample details report for specific sample IDs (shows all targets including IC, with both Azure and Embed results)')
+    parser.add_argument('--dont-scale-y', action='store_true',
+                       help='Disable y-axis rescaling when toggling controls (default: y-axis rescales to fit visible data)')
 
     args = parser.parse_args()
 
@@ -880,19 +1447,37 @@ def main():
     # Connect to database
     conn = sqlite3.connect(args.db)
 
-    filter_msg = "" if args.include_ic else " (excluding IC targets)"
-    print(f"Reading Azure classification records from both readings and test_data tables{filter_msg}...")
-    records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed)
+    # Sample details mode
+    if args.sample_details:
+        print(f"Reading records for samples: {args.sample_details}...")
+        records = get_sample_detail_records(conn, args.sample_details)
 
-    if not records:
-        print(f"No records with Azure classification found in database")
-        conn.close()
-        sys.exit(1)
+        if not records:
+            print(f"No records found for samples: {args.sample_details}")
+            conn.close()
+            sys.exit(1)
 
-    print(f"Found {len(records)} records with Azure classification")
+        print(f"Found {len(records)} records for {len(args.sample_details)} samples")
 
-    # Generate HTML report
-    generate_html_report(conn, records, args.output, show_cfd=args.show_cfd, compare_embed=args.compare_embed)
+        # Generate sample details report
+        scale_y_axis = not args.dont_scale_y
+        generate_sample_details_report(conn, records, args.output, show_cfd=args.show_cfd, scale_y_axis=scale_y_axis)
+    else:
+        # Standard comparison mode
+        filter_msg = "" if args.include_ic else " (excluding IC targets)"
+        print(f"Reading Azure classification records from both readings and test_data tables{filter_msg}...")
+        records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed)
+
+        if not records:
+            print(f"No records with Azure classification found in database")
+            conn.close()
+            sys.exit(1)
+
+        print(f"Found {len(records)} records with Azure classification")
+
+        # Generate HTML report
+        scale_y_axis = not args.dont_scale_y
+        generate_html_report(conn, records, args.output, show_cfd=args.show_cfd, compare_embed=args.compare_embed, scale_y_axis=scale_y_axis)
 
     conn.close()
     return 0
