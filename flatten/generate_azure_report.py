@@ -335,34 +335,42 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     margin = 30
     plot_width = width - 2 * margin
     plot_height = height - 2 * margin
+    padding_ratio = 0.06
 
     if not readings or len(readings) < 2:
         return f'<div style="color: red;">No data for ID {record_id}</div>'
 
-    # Collect all readings to determine global min/max for scaling
-    all_readings = readings.copy()
-    if pos_controls:
-        for _, ctrl_readings in pos_controls:
-            all_readings.extend(ctrl_readings)
-    if neg_controls:
-        for _, ctrl_readings in neg_controls:
-            all_readings.extend(ctrl_readings)
+    main_min = min(readings)
+    main_max = max(readings)
+    value_range = main_max - main_min
 
-    min_reading = min(all_readings)
-    max_reading = max(all_readings)
-    reading_range = max_reading - min_reading if max_reading != min_reading else 1
+    if value_range == 0:
+        adjustment = max(abs(main_max) * 0.1, 1)
+        min_display = main_min - (adjustment / 2)
+        max_display = main_max + (adjustment / 2)
+    else:
+        padding = value_range * padding_ratio
+        min_display = main_min - padding
+        max_display = main_max + padding
 
-    def generate_polyline(readings_data):
+    reading_range = max(max_display - min_display, 1e-6)
+
+    def generate_polyline(readings_data, value_min, value_range):
         """Generate polyline points for a set of readings"""
         points = []
+        steps = max(len(readings_data) - 1, 1)
         for i, reading in enumerate(readings_data):
-            x = margin + (i * plot_width / (len(readings_data) - 1))
-            y = margin + plot_height - (plot_height * (reading - min_reading) / reading_range)
+            x = margin + (i * plot_width / steps)
+            normalized = (reading - value_min) / value_range
+            y = margin + plot_height - (plot_height * normalized)
             points.append(f"{x:.1f},{y:.1f}")
         return " ".join(points)
 
+    def format_readings(readings_data):
+        return ",".join(f"{float(val):.6f}" for val in readings_data)
+
     # Generate main sample polyline
-    main_polyline = generate_polyline(readings)
+    main_polyline = generate_polyline(readings, min_display, reading_range)
 
     # Determine color based on AzureCls
     cls_colors = {
@@ -389,20 +397,22 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     # Positive controls (blue, dashed)
     if pos_controls:
         for sample_name, ctrl_readings in pos_controls:
-            polyline = generate_polyline(ctrl_readings)
+            polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#3498db" stroke-width="1.5"
-                      stroke-dasharray="5,3" class="control-curve hidden" data-control-type="positive"/>
+                      stroke-dasharray="5,3" class="control-curve hidden" data-control-type="positive"
+                      data-readings="{format_readings(ctrl_readings)}"/>
             '''
         legend_items.append('<span style="color:#3498db;">━━ Pos Ctrl</span>')
 
     # Negative controls (gray, dotted)
     if neg_controls:
         for sample_name, ctrl_readings in neg_controls:
-            polyline = generate_polyline(ctrl_readings)
+            polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#95a5a6" stroke-width="1.5"
-                      stroke-dasharray="2,2" class="control-curve hidden" data-control-type="negative"/>
+                      stroke-dasharray="2,2" class="control-curve hidden" data-control-type="negative"
+                      data-readings="{format_readings(ctrl_readings)}"/>
             '''
         legend_items.append('<span style="color:#95a5a6;">··· Neg Ctrl</span>')
 
@@ -447,7 +457,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
         <div class="graph-header">
             {header_text}
         </div>
-        <svg width="{width}" height="{height}" style="background: white;">
+        <svg width="{width}" height="{height}" style="background: white;" data-margin="{margin}">
             <!-- Grid lines -->
             <line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height-margin}" stroke="#ddd" stroke-width="1"/>
             <line x1="{margin}" y1="{height-margin}" x2="{width-margin}" y2="{height-margin}" stroke="#ddd" stroke-width="1"/>
@@ -456,11 +466,12 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
             {control_polylines}
 
             <!-- Main sample curve -->
-            <polyline points="{main_polyline}" fill="none" stroke="{main_color}" stroke-width="2" class="main-curve"/>
+            <polyline points="{main_polyline}" fill="none" stroke="{main_color}" stroke-width="2"
+                      class="main-curve" data-readings="{format_readings(readings)}"/>
 
             <!-- Y-axis labels -->
-            <text x="{margin-5}" y="{margin+5}" text-anchor="end" font-size="10" fill="#666">{max_reading:.0f}</text>
-            <text x="{margin-5}" y="{height-margin+5}" text-anchor="end" font-size="10" fill="#666">{min_reading:.0f}</text>
+            <text class="y-axis-max" x="{margin-5}" y="{margin+5}" text-anchor="end" font-size="10" fill="#666">{max_display:.0f}</text>
+            <text class="y-axis-min" x="{margin-5}" y="{height-margin+5}" text-anchor="end" font-size="10" fill="#666">{min_display:.0f}</text>
 
             {cfd_overlay}
         </svg>
@@ -610,71 +621,116 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
             }
         </style>
         <script>
-            // Extract numeric coordinates from polyline points string
-            function extractYValues(pointsStr) {
-                const points = pointsStr.split(' ');
-                const yValues = [];
-                points.forEach(point => {
-                    const coords = point.split(',');
-                    if (coords.length === 2) {
-                        yValues.push(parseFloat(coords[1]));
-                    }
-                });
-                return yValues;
+            const Y_PADDING_RATIO = 0.06;
+
+            function parseReadings(polyline) {
+                const data = polyline.dataset.readings;
+                if (!data) {
+                    return [];
+                }
+                return data.split(',')
+                    .map(Number)
+                    .filter(value => Number.isFinite(value));
             }
 
-            // Rescale SVG y-axis based on visible curves
-            function rescaleYAxis(svg, showControls) {
-                // SVG plot area constants (must match Python generation: margin=30, height=180)
-                const plotYTop = 30;
-                const plotYBottom = 150;
-                const plotHeight = plotYBottom - plotYTop;
+            function getPlotConfig(svg) {
+                const width = parseFloat(svg.getAttribute('width')) || 0;
+                const height = parseFloat(svg.getAttribute('height')) || 0;
+                const margin = parseFloat(svg.dataset.margin || 30);
+                return {
+                    margin,
+                    plotWidth: Math.max(width - (2 * margin), 1),
+                    plotHeight: Math.max(height - (2 * margin), 1)
+                };
+            }
 
-                // If controls are hidden, reset to normal - don't apply any scaling transform
-                if (!showControls) {
-                    svg.style.transform = 'none';
+            function buildPolylinePoints(readings, config, minValue, maxValue) {
+                if (readings.length < 2) {
+                    return '';
+                }
+
+                const denominator = Math.max(readings.length - 1, 1);
+                const range = maxValue - minValue;
+                const safeRange = range === 0 ? 1 : range;
+
+                return readings.map((reading, index) => {
+                    const x = config.margin + (index * config.plotWidth / denominator);
+                    const normalized = (reading - minValue) / safeRange;
+                    const y = config.margin + config.plotHeight - (config.plotHeight * normalized);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
+            }
+
+            function computeScaleValues(polylines) {
+                let allValues = [];
+                polylines.forEach(polyline => {
+                    allValues = allValues.concat(parseReadings(polyline));
+                });
+
+                if (allValues.length === 0) {
+                    return null;
+                }
+
+                let minValue = Math.min(...allValues);
+                let maxValue = Math.max(...allValues);
+                let range = maxValue - minValue;
+
+                if (range === 0) {
+                    const adjustment = Math.max(Math.abs(maxValue) * 0.05, 1);
+                    minValue -= adjustment;
+                    maxValue += adjustment;
+                    range = maxValue - minValue;
+                }
+
+                const padding = range * Y_PADDING_RATIO;
+                return {
+                    min: minValue - padding,
+                    max: maxValue + padding
+                };
+            }
+
+            function rescaleGraph(svg, includeControls) {
+                if (!svg) {
                     return;
                 }
 
-                // If controls are shown, use all visible polylines (main + controls) to calculate scale
-                const visiblePolylines = svg.querySelectorAll('polyline:not(.hidden)');
-
-                if (visiblePolylines.length === 0) {
-                    svg.style.transform = 'none';
+                const mainCurves = Array.from(svg.querySelectorAll('.main-curve'));
+                if (mainCurves.length === 0) {
                     return;
                 }
 
-                // Extract Y values from all visible polylines
-                let allYValues = [];
-                visiblePolylines.forEach(line => {
-                    const points = line.getAttribute('points');
+                const curvesForScale = [...mainCurves];
+                if (includeControls) {
+                    curvesForScale.push(...svg.querySelectorAll('.control-curve'));
+                }
+
+                const scaleValues = computeScaleValues(curvesForScale);
+                if (!scaleValues) {
+                    return;
+                }
+
+                const config = getPlotConfig(svg);
+                const allCurves = svg.querySelectorAll('.main-curve, .control-curve');
+
+                allCurves.forEach(curve => {
+                    const readings = parseReadings(curve);
+                    if (readings.length < 2) {
+                        return;
+                    }
+                    const points = buildPolylinePoints(readings, config, scaleValues.min, scaleValues.max);
                     if (points) {
-                        const yValues = extractYValues(points);
-                        allYValues = allYValues.concat(yValues);
+                        curve.setAttribute('points', points);
                     }
                 });
 
-                if (allYValues.length === 0) {
-                    svg.style.transform = 'none';
-                    return;
+                const maxLabel = svg.querySelector('.y-axis-max');
+                if (maxLabel) {
+                    maxLabel.textContent = scaleValues.max.toFixed(0);
                 }
-
-                // Find min/max in current SVG space
-                const minYSvg = Math.min(...allYValues);
-                const maxYSvg = Math.max(...allYValues);
-
-                // Calculate span of visible data with 10% padding
-                const dataSpan = maxYSvg - minYSvg;
-                const padding = dataSpan * 0.1;
-                const totalSpan = dataSpan + (padding * 2);
-
-                // Calculate scale factor
-                const scaleFactor = plotHeight / totalSpan;
-
-                // Apply CSS transform only when showing controls
-                // This zooms the entire SVG to fit all visible data
-                svg.style.transformOrigin = `${plotYTop}px ${plotYTop}px`;
-                svg.style.transform = `scaleY(${scaleFactor})`;
+                const minLabel = svg.querySelector('.y-axis-min');
+                if (minLabel) {
+                    minLabel.textContent = scaleValues.min.toFixed(0);
+                }
             }
 
             function toggleControls(sectionId, scaleYAxis = true) {
@@ -707,10 +763,13 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                     legend.style.display = isHidden ? 'block' : 'none';
                 });
 
+                // Determine target scaling (include controls when showing)
+                const includeControls = isHidden;
+
                 // Rescale Y-axis if enabled
                 if (scaleYAxis) {
                     svgs.forEach(svg => {
-                        rescaleYAxis(svg, !isHidden);
+                        rescaleGraph(svg, includeControls);
                     });
                 }
 
@@ -1039,73 +1098,132 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
             }
         </style>
         <script>
-            // Helper function to extract Y values from SVG polyline points
-            function extractYValues(pointsStr) {
-                const points = pointsStr.split(' ');
-                const yValues = [];
-                points.forEach(point => {
-                    const coords = point.split(',');
-                    if (coords.length === 2) {
-                        yValues.push(parseFloat(coords[1]));
-                    }
-                });
-                return yValues;
+            const Y_PADDING_RATIO = 0.06;
+
+            function parseReadings(polyline) {
+                const data = polyline.dataset.readings;
+                if (!data) {
+                    return [];
+                }
+                return data.split(',')
+                    .map(Number)
+                    .filter(value => Number.isFinite(value));
             }
 
-            // Rescale y-axis to fit visible curves using CSS transform
-            function rescaleYAxis(svg, showControls) {
-                const polylines = svg.querySelectorAll('polyline:not(.hidden)');
+            function getPlotConfig(svg) {
+                const width = parseFloat(svg.getAttribute('width')) || 0;
+                const height = parseFloat(svg.getAttribute('height')) || 0;
+                const margin = parseFloat(svg.dataset.margin || 30);
+                return {
+                    margin,
+                    plotWidth: Math.max(width - (2 * margin), 1),
+                    plotHeight: Math.max(height - (2 * margin), 1)
+                };
+            }
 
-                // If no visible polylines or controls are hidden, reset to normal scale
-                if (polylines.length === 0 || !showControls) {
-                    svg.style.transform = 'scaleY(1)';
+            function buildPolylinePoints(readings, config, minValue, maxValue) {
+                if (readings.length < 2) {
+                    return '';
+                }
+
+                const denominator = Math.max(readings.length - 1, 1);
+                const range = maxValue - minValue;
+                const safeRange = range === 0 ? 1 : range;
+
+                return readings.map((reading, index) => {
+                    const x = config.margin + (index * config.plotWidth / denominator);
+                    const normalized = (reading - minValue) / safeRange;
+                    const y = config.margin + config.plotHeight - (config.plotHeight * normalized);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
+            }
+
+            function computeScaleValues(polylines) {
+                let allValues = [];
+                polylines.forEach(polyline => {
+                    allValues = allValues.concat(parseReadings(polyline));
+                });
+
+                if (allValues.length === 0) {
+                    return null;
+                }
+
+                let minValue = Math.min(...allValues);
+                let maxValue = Math.max(...allValues);
+                let range = maxValue - minValue;
+
+                if (range === 0) {
+                    const adjustment = Math.max(Math.abs(maxValue) * 0.05, 1);
+                    minValue -= adjustment;
+                    maxValue += adjustment;
+                    range = maxValue - minValue;
+                }
+
+                const padding = range * Y_PADDING_RATIO;
+                return {
+                    min: minValue - padding,
+                    max: maxValue + padding
+                };
+            }
+
+            function rescaleGraph(svg, includeControls) {
+                if (!svg) {
                     return;
                 }
 
-                // Extract all Y values from visible polylines
-                let allYValues = [];
-                polylines.forEach(line => {
-                    const points = line.getAttribute('points');
+                const mainCurves = Array.from(svg.querySelectorAll('.main-curve'));
+                if (mainCurves.length === 0) {
+                    return;
+                }
+
+                const curvesForScale = [...mainCurves];
+                if (includeControls) {
+                    curvesForScale.push(...svg.querySelectorAll('.control-curve'));
+                }
+
+                const scaleValues = computeScaleValues(curvesForScale);
+                if (!scaleValues) {
+                    return;
+                }
+
+                const config = getPlotConfig(svg);
+                const allCurves = svg.querySelectorAll('.main-curve, .control-curve');
+
+                allCurves.forEach(curve => {
+                    const readings = parseReadings(curve);
+                    if (readings.length < 2) {
+                        return;
+                    }
+                    const points = buildPolylinePoints(readings, config, scaleValues.min, scaleValues.max);
                     if (points) {
-                        const yValues = extractYValues(points);
-                        allYValues = allYValues.concat(yValues);
+                        curve.setAttribute('points', points);
                     }
                 });
 
-                if (allYValues.length === 0) {
-                    svg.style.transform = 'scaleY(1)';
-                    return;
+                const maxLabel = svg.querySelector('.y-axis-max');
+                if (maxLabel) {
+                    maxLabel.textContent = scaleValues.max.toFixed(0);
                 }
-
-                // Find min/max in current SVG space (30-150)
-                const minYSvg = Math.min(...allYValues);
-                const maxYSvg = Math.max(...allYValues);
-
-                // SVG plot area constants
-                const plotYTop = 30;
-                const plotYBottom = 150;
-                const plotHeight = plotYBottom - plotYTop;
-
-                // Calculate span of visible data with 10% padding
-                const dataSpan = maxYSvg - minYSvg;
-                const padding = dataSpan * 0.1;
-                const totalSpan = dataSpan + (padding * 2);
-
-                // Calculate scale factor (how much to expand)
-                const scaleFactor = plotHeight / totalSpan;
-
-                // Apply CSS transform to zoom the SVG plot area
-                svg.style.transformOrigin = `${plotYTop}px ${plotYTop}px`;
-                svg.style.transform = `scaleY(${scaleFactor})`;
+                const minLabel = svg.querySelector('.y-axis-min');
+                if (minLabel) {
+                    minLabel.textContent = scaleValues.min.toFixed(0);
+                }
             }
 
             function toggleControls(sectionId, scaleYAxis = true) {
                 const section = document.getElementById(sectionId);
+                if (!section) {
+                    console.error('Section not found:', sectionId);
+                    return;
+                }
+
                 const curves = section.querySelectorAll('.control-curve');
                 const legends = section.querySelectorAll('.graph-legend');
-                const btn = section.querySelector('.toggle-controls-btn');
+                const svgs = section.querySelectorAll('svg');
+                const header = section.previousElementSibling;
+                const btn = header ? header.querySelector('.toggle-controls-btn') : null;
 
-                const isHidden = curves[0] && curves[0].classList.contains('hidden');
+                const isHidden = curves.length > 0 && curves[0].classList.contains('hidden');
 
                 curves.forEach(curve => {
                     if (isHidden) {
@@ -1119,16 +1237,16 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                     legend.style.display = isHidden ? 'block' : 'none';
                 });
 
-                if (btn) {
-                    btn.textContent = isHidden ? 'Hide Controls' : 'Show Controls';
+                const includeControls = isHidden;
+
+                if (scaleYAxis) {
+                    svgs.forEach(svg => {
+                        rescaleGraph(svg, includeControls);
+                    });
                 }
 
-                // Rescale Y-axis if enabled
-                if (scaleYAxis) {
-                    const svg = section.querySelector('svg');
-                    if (svg) {
-                        rescaleYAxis(svg, !isHidden);
-                    }
+                if (btn) {
+                    btn.textContent = isHidden ? 'Hide Controls' : 'Show Controls';
                 }
             }
 
