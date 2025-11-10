@@ -207,6 +207,60 @@ python3 flatten/compare_k_parameters.py --default-k=0.0 --test-k=0.2 --sanity-ch
 
 **Output**: HTML files in `output_data/` showing only curves where flattening decision changes
 
+---
+
+### 8. `generate_azure_report.py` ⭐
+**Purpose**: Generate HTML reports with Azure classification results and optional control curves
+
+**Parameters**:
+- `--db [path]`: Path to SQLite database file (default: readings.db)
+- `--output [path]`: Output HTML file path (default: output_data/azure_report.html)
+- `--sample-details [id1,id2,...]`: Generate report for specific sample IDs (shows all targets)
+- `--show-cfd`: Display Azure confidence values in top-right corner of graphs
+- `--include-ic`: Include IC (internal control) targets (default: excluded)
+- `--compare-embed`: Group results by comparison between Azure and embedded machine classifications
+- `--dont-scale-y`: Disable y-axis rescaling when toggling control curves (default: enabled)
+
+**Features**:
+- **Control Curves**: Optional positive/negative control curves with toggle visibility
+- **Smart Y-axis Scaling**: Automatically rescales to fit all visible data when controls are shown
+- **Azure Classification**: Color-coded curves by classification (green=negative, red=positive, orange=ambiguous)
+- **Embedded Results**: Optional display of machine learning classification results
+- **Sample Organization**: Organized by Sample → Run → Mix → Target
+
+**Usage Examples**:
+```bash
+# Standard Azure report
+python3 flatten/generate_azure_report.py --db ~/dbs/readings.db --output output_data/azure_report.html
+
+# Generate report for specific samples
+python3 flatten/generate_azure_report.py --db ~/dbs/readings.db --sample-details 1536470 1536107 1536068 --output output_data/custom_samples.html
+
+# Show confidence values
+python3 flatten/generate_azure_report.py --show-cfd --output output_data/azure_report_with_cfd.html
+
+# Include IC targets
+python3 flatten/generate_azure_report.py --include-ic --output output_data/azure_report_full.html
+
+# Compare with embedded machine results (group by DISCREPANT/EQUIVOCAL/AGREED)
+python3 flatten/generate_azure_report.py --compare-embed --output output_data/azure_embed_comparison.html
+
+# Disable y-axis rescaling (keep fixed scale)
+python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azure_report_fixed_scale.html
+```
+
+**Output**: Interactive HTML report with graphs and optional control curves
+- Main sample curve displayed at appropriate scale
+- Control curves initially hidden with "Show Controls" button
+- Y-axis automatically rescales when toggling control visibility
+- Y-axis returns to normal scale when controls are hidden again
+
+**Features**:
+- **Interactive Controls**: Toggle visibility of positive/negative control curves
+- **Smart Scaling**: Y-axis rescales to fit visible curves when controls are shown
+- **Color Legend**: Positive controls (blue dashed), Negative controls (gray dotted)
+- **Responsive Layout**: 5-column grid layout for easy browsing
+
 ## CUSUM Parameter Guidelines
 
 ### k Parameter Range
@@ -322,15 +376,16 @@ All Python scripts support a standardized set of command line parameters for con
 
 ### Parameter Compatibility Matrix
 
-| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob |
-|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|
-| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ |
-| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ |
-| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob | --sample-details |
+|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|------------------|
+| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| `generate_azure_report.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
 
 **Legend:**
 - ✅ = Parameter available
@@ -359,14 +414,14 @@ flatten/
 ├── generate_database_flattened_html_fixed.py  # Database verification
 ├── generate_pcrai_from_db.py             # PCRAI export
 ├── compare_k_parameters.py               # K parameter comparison ⭐
-├── manage_example_ids.py                 # Example dataset management 🆕
+├── generate_azure_report.py              # Azure report generation ⭐ (with smart y-axis scaling)
+├── manage_example_ids.py                 # Example dataset management
 ├── extract_non_inverted_sigmoid_proper.py # Sigmoid filtering
 ├── create_database_from_csv.py           # Database creation
 ├── prepare_test_data.py                  # Test data prep
 ├── import_test_data.py                   # Test data import
 ├── import_azure_results.py               # Azure results import
 ├── import_pos_controls.py                # Control import
-├── generate_azure_report.py              # Azure report generation
 ├── update_embed_from_csv.py              # Embedding updates
 ├── utils/                                # Shared utility modules
 │   ├── database.py                       # Database functions
