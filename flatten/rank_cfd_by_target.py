@@ -21,9 +21,6 @@ def parse_args():
     )
     parser.add_argument('--db', default='~/dbs/readings.db',
                        help='Path to SQLite database file (default: ~/dbs/readings.db)')
-    parser.add_argument('--table', default='readings',
-                       choices=['readings', 'test_data', 'flatten', 'flatten_test'],
-                       help='Table to update (default: readings)')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what would be updated without making changes')
     return parser.parse_args()
@@ -43,15 +40,15 @@ def main():
     cursor = conn.cursor()
 
     print(f"Database: {db_path}")
-    print(f"Target table: {args.table}")
+    print(f"Target table: all_readings")
     if args.dry_run:
         print("DRY RUN MODE - No changes will be made")
     print()
 
-    # Get all unique mix-target combinations (excluding IC)
-    cursor.execute(f"""
+    # Get all unique mix-target combinations (excluding IC) from all_readings
+    cursor.execute("""
         SELECT DISTINCT Mix, MixTarget
-        FROM {args.table}
+        FROM all_readings
         WHERE MixTarget != 'IC' AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
         ORDER BY Mix, MixTarget
     """)
@@ -67,12 +64,14 @@ def main():
 
     # Process each combination
     for mix, mixtarget in combinations:
-        # Get all rows for this combination with both CFD values
-        cursor.execute(f"""
-            SELECT id, AzureCFD, ar_cfd
-            FROM {args.table}
+        # Get all rows from all_readings for this combination with both CFD values
+        # Sorted by AzureCFD ascending for Azure ranking
+        # Use rowid as unique identifier, original_id as tiebreaker for stable ordering
+        cursor.execute("""
+            SELECT rowid, original_id, AzureCFD, ar_cfd
+            FROM all_readings
             WHERE Mix = ? AND MixTarget = ? AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
-            ORDER BY AzureCFD ASC
+            ORDER BY AzureCFD ASC, original_id ASC
         """, (mix, mixtarget))
 
         azure_rows = cursor.fetchall()
@@ -80,41 +79,46 @@ def main():
         if not azure_rows:
             continue
 
-        # Rank Azure CFD (sorted by AzureCFD ascending)
+        # Rank Azure CFD with unique sequential ranks (1, 2, 3, ...)
+        # Each row gets a unique rank regardless of CFD value ties
         azure_update_values = []
-        for rank, (row_id, azure_cfd, ar_cfd) in enumerate(azure_rows, start=1):
-            azure_update_values.append((rank, row_id))
+        for rank, (rowid, orig_id, azure_cfd, ar_cfd) in enumerate(azure_rows, start=1):
+            azure_update_values.append((rank, rowid))
 
         # Get rows sorted by ar_cfd for AR ranking
-        cursor.execute(f"""
-            SELECT id, AzureCFD, ar_cfd
-            FROM {args.table}
+        # Use rowid as unique identifier, original_id as tiebreaker for stable ordering
+        cursor.execute("""
+            SELECT rowid, original_id, AzureCFD, ar_cfd
+            FROM all_readings
             WHERE Mix = ? AND MixTarget = ? AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
-            ORDER BY ar_cfd ASC
+            ORDER BY ar_cfd ASC, original_id ASC
         """, (mix, mixtarget))
 
         ar_rows = cursor.fetchall()
 
-        # Rank AR CFD (sorted by ar_cfd ascending)
+        # Rank AR CFD with unique sequential ranks (1, 2, 3, ...)
+        # Each row gets a unique rank regardless of CFD value ties
         ar_update_values = []
-        for rank, (row_id, azure_cfd, ar_cfd) in enumerate(ar_rows, start=1):
-            ar_update_values.append((rank, row_id))
+        for rank, (rowid, orig_id, azure_cfd, ar_cfd) in enumerate(ar_rows, start=1):
+            ar_update_values.append((rank, rowid))
 
         # Update database
         if not args.dry_run:
             # Update azure_order
-            cursor.executemany(f"""
-                UPDATE {args.table}
-                SET azure_order = ?
-                WHERE id = ?
-            """, azure_update_values)
+            for rank, rowid in azure_update_values:
+                cursor.execute("""
+                    UPDATE all_readings
+                    SET azure_order = ?
+                    WHERE rowid = ?
+                """, (rank, rowid))
 
             # Update ar_order
-            cursor.executemany(f"""
-                UPDATE {args.table}
-                SET ar_order = ?
-                WHERE id = ?
-            """, ar_update_values)
+            for rank, rowid in ar_update_values:
+                cursor.execute("""
+                    UPDATE all_readings
+                    SET ar_order = ?
+                    WHERE rowid = ?
+                """, (rank, rowid))
 
             stats['total_rows_ranked'] += len(azure_rows)
             stats['combinations_processed'] += 1
