@@ -1813,7 +1813,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 html_content += f'''
             <h3>
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -1861,7 +1861,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 html_content += f'''
             <h3>
                 {cls_label}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -2406,7 +2406,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -2454,7 +2454,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 {cls_label}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''

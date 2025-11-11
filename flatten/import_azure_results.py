@@ -27,7 +27,7 @@ def parse_args():
                        help='Path to SQLite database file (default: ~/dbs/readings.db)')
     parser.add_argument('--csv', required=True,
                        help='Path to CSV file containing Azure/AR results')
-    parser.add_argument('--table', default='readings',
+    parser.add_argument('--table', default='all_readings',
                        choices=['readings', 'test_data', 'flatten', 'flatten_test', 'all_readings'],
                        help='Table to update (default: all_readings)')
     parser.add_argument('--ar-results', action='store_true',
