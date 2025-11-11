@@ -21,15 +21,17 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Import Azure classification results from CSV to database'
+        description='Import Azure or AR (Azure Results) classification results from CSV to database'
     )
-    parser.add_argument('--db', default='readings.db',
-                       help='Path to SQLite database file (default: readings.db)')
+    parser.add_argument('--db', default='~/dbs/readings.db',
+                       help='Path to SQLite database file (default: ~/dbs/readings.db)')
     parser.add_argument('--csv', required=True,
-                       help='Path to CSV file containing Azure results')
+                       help='Path to CSV file containing Azure/AR results')
     parser.add_argument('--table', default='readings',
                        choices=['readings', 'test_data', 'flatten', 'flatten_test'],
                        help='Table to update (default: readings)')
+    parser.add_argument('--ar-results', action='store_true',
+                       help='Import as AR (Azure Results) data instead of Azure data')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what would be updated without making changes')
     return parser.parse_args()
@@ -38,17 +40,21 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Expand paths
+    csv_path = Path(args.csv)
+    db_path = Path(args.db).expanduser()
+
     # Check if CSV file exists
-    if not Path(args.csv).exists():
+    if not csv_path.exists():
         print(f"Error: CSV file not found: {args.csv}")
         sys.exit(1)
 
     # Check if database exists
-    if not Path(args.db).exists():
-        print(f"Error: Database file not found: {args.db}")
+    if not db_path.exists():
+        print(f"Error: Database file not found: {db_path}")
         sys.exit(1)
 
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(str(db_path))
     cursor = conn.cursor()
 
     # Statistics
@@ -62,7 +68,22 @@ def main():
         'errors': []
     }
 
+    # Determine import mode and set column names
+    if args.ar_results:
+        import_mode = "AR Results"
+        cls_col = 'ar_cls'
+        amb_col = 'ar_amb'
+        cfd_col = 'ar_cfd'
+        ct_col = 'ar_ct'
+    else:
+        import_mode = "Azure"
+        cls_col = 'AzureCls'
+        amb_col = 'AzureAmb'
+        cfd_col = 'AzureCFD'
+        ct_col = None  # Azure doesn't have CT column in output
+
     print(f"Reading CSV: {args.csv}")
+    print(f"Import mode: {import_mode}")
     print(f"Database: {args.db}")
     print(f"Target table: {args.table}")
     if args.dry_run:
@@ -80,15 +101,20 @@ def main():
             mix_idx = header.index('Mix')
             mixtarget_idx = header.index('MixTarget')
             tube_idx = header.index('Tube')
-            azurecls_idx = header.index('AzureCls')
-            azureamb_idx = header.index('AzureAmb')
-            azurecfd_idx = header.index('AzureCFD')
+            cls_idx = header.index('AzureCls')  # CSV always has AzureCls
+            amb_idx = header.index('AzureAmb')  # CSV always has AzureAmb
+            cfd_idx = header.index('AzureCFD')  # CSV always has AzureCFD
+            # CT column is optional
+            try:
+                ct_idx = header.index('AzureCT') if args.ar_results else None
+            except ValueError:
+                ct_idx = None
         except ValueError as e:
             print(f"Error: Required column not found in CSV: {e}")
             sys.exit(1)
 
         for row in reader:
-            if len(row) < max(sample_idx, file_idx, mix_idx, mixtarget_idx, tube_idx, azurecls_idx, azureamb_idx, azurecfd_idx) + 1:
+            if len(row) < max(sample_idx, file_idx, mix_idx, mixtarget_idx, tube_idx, cls_idx, amb_idx, cfd_idx) + 1:
                 continue
 
             stats['total_rows'] += 1
@@ -100,31 +126,39 @@ def main():
             csv_mixtarget = row[mixtarget_idx].strip()
             csv_tube = row[tube_idx].strip()
 
-            # Parse AzureCls, AzureAmb, and AzureCFD
+            # Parse classification, ambiguity, and confidence values
             try:
-                azure_cls_csv = int(row[azurecls_idx]) if row[azurecls_idx].strip() else None
+                cls_csv = int(row[cls_idx]) if row[cls_idx].strip() else None
             except (ValueError, IndexError):
-                azure_cls_csv = None
+                cls_csv = None
 
             try:
-                azure_amb = int(row[azureamb_idx]) if row[azureamb_idx].strip() else 0
+                amb = int(row[amb_idx]) if row[amb_idx].strip() else 0
             except (ValueError, IndexError):
-                azure_amb = 0
+                amb = 0
 
             try:
-                azure_cfd = float(row[azurecfd_idx]) if row[azurecfd_idx].strip() else None
+                cfd = float(row[cfd_idx]) if row[cfd_idx].strip() else None
             except (ValueError, IndexError):
-                azure_cfd = None
+                cfd = None
 
-            # Apply the rule: if AzureAmb == 1, override AzureCls to 2
-            if azure_amb == 1:
-                azure_cls = 2
+            # Parse CT value if present
+            ct_val = None
+            if ct_idx is not None:
+                try:
+                    ct_val = float(row[ct_idx]) if row[ct_idx].strip() else None
+                except (ValueError, IndexError):
+                    ct_val = None
+
+            # Apply the rule: if Amb == 1, override Cls to 2
+            if amb == 1:
+                cls = 2
                 stats['amb_override'] += 1
             else:
-                azure_cls = azure_cls_csv
+                cls = cls_csv
 
-            # Skip if both are None
-            if azure_cls is None and azure_cfd is None:
+            # Skip if both cls and cfd are None
+            if cls is None and cfd is None:
                 continue
 
             # Create unique identifier (using File instead of FileUID)
@@ -132,7 +166,7 @@ def main():
 
             # Find matching record in database using File column
             cursor.execute(f"""
-                SELECT id, Sample, AzureCls, AzureCFD
+                SELECT id, Sample
                 FROM {args.table}
                 WHERE File = ? AND Tube = ? AND Mix = ? AND MixTarget = ?
             """, (csv_file, csv_tube, csv_mix, csv_mixtarget))
@@ -140,7 +174,7 @@ def main():
             result = cursor.fetchone()
 
             if result:
-                db_id, db_sample, db_azurecls, db_azurecfd = result
+                db_id, db_sample = result
                 stats['matched'] += 1
 
                 # Sanity check: verify sample names match
@@ -154,16 +188,35 @@ def main():
 
                 # Update the record
                 if not args.dry_run:
-                    cursor.execute(f"""
-                        UPDATE {args.table}
-                        SET AzureCls = ?, AzureCFD = ?
-                        WHERE id = ?
-                    """, (azure_cls, azure_cfd, db_id))
+                    if args.ar_results:
+                        # Update AR columns
+                        if ct_val is not None:
+                            cursor.execute(f"""
+                                UPDATE {args.table}
+                                SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?, {ct_col} = ?
+                                WHERE id = ?
+                            """, (cls, amb, cfd, ct_val, db_id))
+                        else:
+                            cursor.execute(f"""
+                                UPDATE {args.table}
+                                SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?
+                                WHERE id = ?
+                            """, (cls, amb, cfd, db_id))
+                    else:
+                        # Update Azure columns
+                        cursor.execute(f"""
+                            UPDATE {args.table}
+                            SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?
+                            WHERE id = ?
+                        """, (cls, amb, cfd, db_id))
                     stats['updated'] += 1
                 else:
                     stats['updated'] += 1
                     if stats['updated'] <= 5:  # Show first 5 updates in dry-run
-                        print(f"Would update {unique_id}: AzureCls={azure_cls}, AzureCFD={azure_cfd}")
+                        if args.ar_results:
+                            print(f"Would update {unique_id}: ar_cls={cls}, ar_amb={amb}, ar_cfd={cfd}" + (f", ar_ct={ct_val}" if ct_val else ""))
+                        else:
+                            print(f"Would update {unique_id}: AzureCls={cls}, AzureAmb={amb}, AzureCFD={cfd}")
             else:
                 stats['not_found'] += 1
                 error_msg = f"Record not found in DB: {unique_id} (Sample: {csv_sample})"

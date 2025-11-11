@@ -8,6 +8,7 @@
 
 ## Build, Test, and Development Commands
 - Create a virtualenv (recommended): `python3 -m venv .venv && source .venv/bin/activate`.
+- When reusing the repo’s shared environment, prefix commands with `source venv/bin/activate && ...` so `tqdm`, NumPy, etc. are available.
 - Quick visual check (example dataset): `python3 generate_flattened_cusum_html.py --example-dataset --k 0.2 --limit 20`.
 - Compare k-values: `python3 compare_k_parameters.py --default-k 0.0 --test-k 0.3 --cusum-limit -80 --example-dataset`.
 - Create flattened DB: `python3 create_flattened_database_fast.py --threshold -100`.
@@ -35,4 +36,3 @@
 - Do not commit databases or generated artifacts (`.gitignore` already excludes `output_data/`, `input_data/`, `readings.db`).
 - Keep secrets and external DB paths out of code; pass paths via CLI flags.
 - When you generate outputdata for testing, put in /output_data folder for ease of finding and git management.
-

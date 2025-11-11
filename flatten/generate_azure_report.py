@@ -14,6 +14,31 @@ from pathlib import Path
 from tqdm import tqdm
 
 
+def apply_baseline(readings, baseline_cycles):
+    """
+    Normalize readings by dividing every point by the average of the first N cycles.
+    Returns the original readings when baseline_cycles <= 0, list is empty, or baseline is ~0.
+    """
+    if not readings or baseline_cycles is None or baseline_cycles <= 0:
+        return readings
+
+    count = min(len(readings), baseline_cycles)
+    if count == 0:
+        return readings
+
+    # Ensure we can safely slice (convert to list if needed)
+    if not isinstance(readings, list):
+        readings = list(readings)
+
+    baseline_slice = readings[:count]
+    baseline_value = sum(baseline_slice) / count if baseline_slice else 0
+
+    if abs(baseline_value) < 1e-9:
+        return readings
+
+    return [value / baseline_value for value in readings]
+
+
 def get_readings_for_id(conn, record_id, table='readings'):
     """Get readings for a specific ID"""
     cursor = conn.cursor()
@@ -110,7 +135,7 @@ def get_control_curves(conn, file_uid, mix, mixtarget, control_samples, is_posit
     return controls
 
 
-def get_sample_detail_records(conn, sample_ids):
+def get_sample_detail_records(conn, sample_ids, include_ic=True):
     """
     Get all records for specified samples with Azure and Embed results.
 
@@ -120,6 +145,7 @@ def get_sample_detail_records(conn, sample_ids):
     Args:
         conn: Database connection
         sample_ids: List of sample IDs to retrieve
+        include_ic: Include IC targets when True (default), otherwise drop IC entries
 
     Returns:
         List of tuples: (id, Sample, File, Mix, MixTarget, Target, AzureCls, AzureCFD,
@@ -130,7 +156,12 @@ def get_sample_detail_records(conn, sample_ids):
     # Convert sample IDs to string list for SQL
     sample_list = ', '.join([f"'{s}'" for s in sample_ids])
 
-    # Query both tables with all targets (including IC), skip E1/E2
+    # Optional IC filter clause
+    ic_filter = ""
+    if not include_ic:
+        ic_filter = "AND UPPER(Target) != 'IC' AND UPPER(MixTarget) != 'IC'"
+
+    # Query both tables with all targets (including IC by default), skip E1/E2
     cursor.execute(f"""
     SELECT * FROM (
         SELECT
@@ -149,6 +180,7 @@ def get_sample_detail_records(conn, sample_ids):
         WHERE Sample IN ({sample_list})
           AND in_use = 1
           AND MixTarget NOT IN ('E1', 'E2')
+          {ic_filter}
 
         UNION ALL
 
@@ -168,6 +200,7 @@ def get_sample_detail_records(conn, sample_ids):
         WHERE Sample IN ({sample_list})
           AND in_use = 1
           AND MixTarget NOT IN ('E1', 'E2')
+          {ic_filter}
     )
     ORDER BY
         Sample,
@@ -178,6 +211,117 @@ def get_sample_detail_records(conn, sample_ids):
     """)
 
     return cursor.fetchall()
+
+
+def fetch_mix_target_records(conn, mix, mixtarget):
+    """
+    Fetch all records for a mix/mixtarget pair (both readings and test_data) with AzureCFD values.
+
+    Returns records sorted by AzureCFD descending to simplify nearest-neighbour lookups.
+    """
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT
+            id,
+            Sample,
+            File,
+            Mix,
+            MixTarget,
+            Target,
+            AzureCls,
+            AzureCFD,
+            EmbedCls,
+            EmbedCt,
+            'readings' AS source_table
+        FROM readings
+        WHERE Mix = ? AND MixTarget = ? AND in_use = 1 AND AzureCFD IS NOT NULL
+
+        UNION ALL
+
+        SELECT
+            id,
+            Sample,
+            File,
+            Mix,
+            MixTarget,
+            Target,
+            AzureCls,
+            AzureCFD,
+            EmbedCls,
+            EmbedCt,
+            'test_data' AS source_table
+        FROM test_data
+        WHERE Mix = ? AND MixTarget = ? AND in_use = 1 AND AzureCFD IS NOT NULL
+    """, (mix, mixtarget, mix, mixtarget))
+
+    records = [{
+        'id': row[0],
+        'sample': row[1],
+        'file': row[2],
+        'mix': row[3],
+        'mixtarget': row[4],
+        'target': row[5],
+        'azure_cls': row[6],
+        'azure_cfd': row[7],
+        'embed_cls': row[8],
+        'embed_ct': row[9],
+        'source_table': row[10]
+    } for row in cursor.fetchall() if row[7] is not None]
+
+    # Sort by AzureCFD descending, then id to stabilize ordering for duplicates
+    records.sort(key=lambda rec: (-rec['azure_cfd'], rec['id']))
+    return records
+
+
+def find_nearest_neighbors(records, record_id, source_table, count):
+    """
+    Given sorted records, return up to `count` neighbours above (higher CFD) and below (lower CFD).
+    """
+    if count <= 0 or not records:
+        return [], []
+
+    target_index = None
+    for idx, rec in enumerate(records):
+        if rec['id'] == record_id and rec['source_table'] == source_table:
+            target_index = idx
+            break
+
+    if target_index is None:
+        return [], []
+
+    higher = []
+    for idx in range(target_index - 1, -1, -1):
+        higher.append(records[idx])
+        if len(higher) == count:
+            break
+
+    lower = []
+    for idx in range(target_index + 1, len(records)):
+        lower.append(records[idx])
+        if len(lower) == count:
+            break
+
+    # Ensure higher neighbours render from largest CFD -> closest to the target (left to right)
+    higher_display = list(reversed(higher))
+    return higher_display, lower
+
+
+def decorate_graph_container(svg_html, extra_classes='', badge_text=None):
+    """
+    Inject additional classes and/or a badge into a generated SVG graph container.
+    """
+    decorated = svg_html
+    if extra_classes:
+        decorated = decorated.replace('class="graph-container"', f'class="graph-container {extra_classes.strip()}"', 1)
+
+    if badge_text:
+        marker = decorated.find('<div class="graph-container')
+        if marker != -1:
+            insert_position = decorated.find('>', marker)
+            if insert_position != -1:
+                badge_html = f'\n        <div class="neighbor-badge">{badge_text}</div>'
+                decorated = decorated[:insert_position + 1] + badge_html + decorated[insert_position + 1:]
+    return decorated
 
 
 def get_azure_records(conn, include_ic=False, compare_embed=False):
@@ -317,7 +461,7 @@ def classify_comparison(azure_cls, embed_cls):
 
 
 def generate_svg_graph(record_id, readings, metadata, width=240, height=180, show_cfd=False,
-                       pos_controls=None, neg_controls=None, show_machine_result=False):
+                       pos_controls=None, neg_controls=None, baseline_cycles=0, show_machine_result=False):
     """
     Generate SVG graph showing the original curve with optional control curves.
 
@@ -330,6 +474,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
         show_cfd: Show CFD value
         pos_controls: List of tuples (sample_name, readings) for positive controls
         neg_controls: List of tuples (sample_name, readings) for negative controls
+        baseline_cycles: Average the first N cycles for each curve and divide values by that baseline
         show_machine_result: Show embedded machine result (POS/NEG with CT)
     """
     margin = 30
@@ -337,11 +482,16 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     plot_height = height - 2 * margin
     padding_ratio = 0.06
 
-    if not readings or len(readings) < 2:
+    baseline_cycles = baseline_cycles or 0
+    processed_readings = readings
+    if baseline_cycles > 0:
+        processed_readings = apply_baseline(readings, baseline_cycles)
+
+    if not processed_readings or len(processed_readings) < 2:
         return f'<div style="color: red;">No data for ID {record_id}</div>'
 
-    main_min = min(readings)
-    main_max = max(readings)
+    main_min = min(processed_readings)
+    main_max = max(processed_readings)
     value_range = main_max - main_min
 
     if value_range == 0:
@@ -370,7 +520,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
         return ",".join(f"{float(val):.6f}" for val in readings_data)
 
     # Generate main sample polyline
-    main_polyline = generate_polyline(readings, min_display, reading_range)
+    main_polyline = generate_polyline(processed_readings, min_display, reading_range)
 
     # Determine color based on AzureCls
     cls_colors = {
@@ -381,13 +531,20 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     main_color = cls_colors.get(metadata['AzureCls'], '#95a5a6')
 
     # Build header text
-    header_text = f"{metadata['Sample']} | {metadata['File'][:12]}... | {metadata['Tube']}"
+    sample_label = str(metadata.get('Sample', 'N/A') or 'N/A')
+    file_label = str(metadata.get('File', 'N/A') or 'N/A')
+    tube_label = str(metadata.get('Tube', 'N/A') or 'N/A')
+    header_text = f"{sample_label} | {file_label[:12]}... | {tube_label}"
+    header_suffix = metadata.get('HeaderSuffix', '')
+    if header_suffix:
+        header_text = f"{header_text}{header_suffix}"
 
     # Optional CFD overlay
     cfd_overlay = ''
-    if show_cfd:
+    azure_cfd_value = metadata.get('AzureCFD')
+    if show_cfd and azure_cfd_value is not None:
         cfd_overlay = f'''
-            <text x="{width-5}" y="12" text-anchor="end" font-size="9" fill="#999" font-weight="bold">CFD:{metadata['AzureCFD']:.2f}</text>
+            <text x="{width-5}" y="12" text-anchor="end" font-size="9" fill="#999" font-weight="bold">CFD:{azure_cfd_value:.2f}</text>
         '''
 
     # Generate control curve polylines
@@ -396,6 +553,9 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
 
     # Positive controls (blue, dashed)
     if pos_controls:
+        if baseline_cycles > 0:
+            pos_controls = [(sample_name, apply_baseline(ctrl_readings, baseline_cycles))
+                            for sample_name, ctrl_readings in pos_controls]
         for sample_name, ctrl_readings in pos_controls:
             polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
@@ -407,6 +567,9 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
 
     # Negative controls (gray, dotted)
     if neg_controls:
+        if baseline_cycles > 0:
+            neg_controls = [(sample_name, apply_baseline(ctrl_readings, baseline_cycles))
+                            for sample_name, ctrl_readings in neg_controls]
         for sample_name, ctrl_readings in neg_controls:
             polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
@@ -467,7 +630,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
 
             <!-- Main sample curve -->
             <polyline points="{main_polyline}" fill="none" stroke="{main_color}" stroke-width="2"
-                      class="main-curve" data-readings="{format_readings(readings)}"/>
+                      class="main-curve" data-readings="{format_readings(processed_readings)}"/>
 
             <!-- Y-axis labels -->
             <text class="y-axis-max" x="{margin-5}" y="{margin+5}" text-anchor="end" font-size="10" fill="#666">{max_display:.0f}</text>
@@ -482,7 +645,8 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     return svg
 
 
-def generate_sample_details_report(conn, records, output_file, show_cfd=False, scale_y_axis=True):
+def generate_sample_details_report(conn, records, output_file, show_cfd=False, scale_y_axis=True,
+                                   add_nearest_neighbour=0, baseline_cycles=0):
     """
     Generate HTML report for sample details mode.
 
@@ -495,6 +659,8 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
         output_file: Output HTML file path
         show_cfd: Show confidence values
         scale_y_axis: Rescale y-axis when toggling controls (default: True)
+        add_nearest_neighbour: Number of higher/lower CFD neighbours to show for each selection
+        baseline_cycles: Average the first N cycles for each curve before plotting
     """
 
     html_content = '''
@@ -618,6 +784,46 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                 background: #ecf0f1;
                 border-radius: 4px;
                 color: #2c3e50;
+            }
+            .graph-group {
+                grid-column: 1 / -1;
+                background: #fbfcff;
+                border-left: 4px solid #2980b9;
+                padding: 10px 12px;
+                border-radius: 8px;
+                margin: 6px 0 12px 0;
+            }
+            .graph-group-title {
+                font-size: 0.9em;
+                font-weight: bold;
+                color: #2c3e50;
+                margin-bottom: 6px;
+            }
+            .graph-group-grid {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 8px;
+                justify-content: center;
+            }
+            .graph-container.neighbor-graph {
+                background: #fdfdfd;
+            }
+            .graph-container.neighbor-graph.neighbor-higher {
+                border: 1px solid #d4e6f1;
+            }
+            .graph-container.neighbor-graph.neighbor-lower {
+                border: 1px solid #f5cba7;
+            }
+            .graph-container.target-graph {
+                border: 2px solid #2c3e50;
+                background: #ffffff;
+            }
+            .neighbor-badge {
+                font-size: 9px;
+                font-weight: bold;
+                text-transform: uppercase;
+                color: #34495e;
+                margin: 4px 0;
             }
         </style>
         <script>
@@ -797,6 +1003,7 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
     current_mix = None
     current_mixtarget = None
     section_counter = 0
+    section_open = False
 
     # Classification labels
     cls_labels = {
@@ -808,11 +1015,16 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
     print(f"Generating sample details report for {len(records)} records...")
 
     current_file = None
+    mix_target_neighbor_cache = {}
+
     for record in tqdm(records, desc="Processing records"):
         rec_id, sample, file, mix, mixtarget, target, azure_cls, azure_cfd, embed_cls, embed_ct, source_table = record
 
         # Add Sample header (h2) when sample changes
         if sample != current_sample:
+            if section_open:
+                html_content += '</div>\n'
+                section_open = False
             html_content += f'''
             <h2>Sample: {sample}</h2>
             '''
@@ -823,6 +1035,9 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
 
         # Add File/Run header (h3) when file changes (for duplicate runs)
         if file != current_file:
+            if section_open:
+                html_content += '</div>\n'
+                section_open = False
             html_content += f'''
             <h3>Run: {file}</h3>
             '''
@@ -832,6 +1047,9 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
 
         # Add Mix header (h3) when it changes
         if mix != current_mix:
+            if section_open:
+                html_content += '</div>\n'
+                section_open = False
             html_content += f'''
             <h3>Mix: {mix}</h3>
             '''
@@ -840,6 +1058,9 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
 
         # Add MixTarget header (h4) when it changes
         if mixtarget != current_mixtarget:
+            if section_open:
+                html_content += '</div>\n'
+                section_open = False
             section_counter += 1
             section_id = f'section_{section_counter}'
             html_content += f'''
@@ -850,6 +1071,7 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
             <div id="{section_id}" style="display: contents;">
             '''
             current_mixtarget = mixtarget
+            section_open = True
 
         # Get readings and generate graph
         try:
@@ -895,7 +1117,8 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                 # Format result labels
                 azure_label = cls_labels.get(azure_cls, 'N/A') if azure_cls is not None else 'N/A'
                 embed_label = cls_labels.get(embed_cls, 'N/A') if embed_cls is not None else 'N/A'
-                embed_ct_str = f"({embed_ct:.2f})" if embed_ct is not None else ""
+                embed_ct_str = f" ({embed_ct:.2f})" if embed_ct is not None else ""
+                header_suffix = f" | Azure: {azure_label} | Embed: {embed_label}{embed_ct_str}"
 
                 # Enhanced metadata with both results in header
                 metadata = {
@@ -906,32 +1129,145 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                     'Sample': sample,
                     'File': file,
                     'Tube': mixtarget,
-                    'Target': target
+                    'Target': target,
+                    'HeaderSuffix': header_suffix
                 }
 
-                svg_graph = generate_svg_graph(rec_id, readings, metadata, show_cfd=show_cfd,
-                                              pos_controls=pos_controls,
-                                              neg_controls=neg_controls,
-                                              show_machine_result=False)
-
-                # Modify SVG graph header to include results instead of separate div
-                # Find and replace the graph-header to include results
-                graph_header = f"{sample} | {file[:12]}... | {mixtarget}"
-                result_label = f" | Azure: {azure_label} | Embed: {embed_label}{' '+embed_ct_str if embed_ct_str else ''}"
-
-                svg_graph = svg_graph.replace(
-                    f'<div class="graph-header">\n            {graph_header}\n        </div>',
-                    f'<div class="graph-header">\n            {graph_header}{result_label}\n        </div>'
+                svg_graph = generate_svg_graph(
+                    rec_id,
+                    readings,
+                    metadata,
+                    show_cfd=show_cfd,
+                    pos_controls=pos_controls,
+                    neg_controls=neg_controls,
+                    baseline_cycles=baseline_cycles,
+                    show_machine_result=False
                 )
+                inserted_group = False
+                neighbour_count = max(0, add_nearest_neighbour or 0)
 
-                html_content += svg_graph
+                if neighbour_count > 0 and azure_cfd is not None:
+                    cache_key = (mix, mixtarget)
+                    if cache_key not in mix_target_neighbor_cache:
+                        mix_target_neighbor_cache[cache_key] = fetch_mix_target_records(conn, mix, mixtarget)
+
+                    mix_records = mix_target_neighbor_cache[cache_key]
+                    higher_neighbors, lower_neighbors = find_nearest_neighbors(
+                        mix_records, rec_id, source_table, neighbour_count
+                    )
+
+                    higher_graphs = []
+                    for neighbor in higher_neighbors:
+                        neighbor_readings = get_readings_for_id(conn, neighbor['id'], neighbor['source_table'])
+                        if not neighbor_readings:
+                            continue
+
+                        neighbor_embed_ct_str = f" ({neighbor['embed_ct']:.2f})" if neighbor['embed_ct'] is not None else ""
+                        neighbor_header_suffix = (
+                            f" | Azure: {cls_labels.get(neighbor['azure_cls'], 'N/A') if neighbor['azure_cls'] is not None else 'N/A'}"
+                            f" | Embed: {cls_labels.get(neighbor['embed_cls'], 'N/A') if neighbor['embed_cls'] is not None else 'N/A'}{neighbor_embed_ct_str}"
+                        )
+                        neighbor_metadata = {
+                            'AzureCls': neighbor['azure_cls'],
+                            'AzureCFD': neighbor['azure_cfd'],
+                            'EmbedCls': neighbor['embed_cls'],
+                            'EmbedCt': neighbor['embed_ct'],
+                            'Sample': neighbor['sample'],
+                            'File': neighbor['file'],
+                            'Tube': neighbor['mixtarget'],
+                            'Target': neighbor['target'],
+                            'HeaderSuffix': neighbor_header_suffix
+                        }
+
+                        neighbor_svg = generate_svg_graph(
+                            neighbor['id'],
+                            neighbor_readings,
+                            neighbor_metadata,
+                            show_cfd=show_cfd,
+                            pos_controls=pos_controls,
+                            neg_controls=neg_controls,
+                            baseline_cycles=baseline_cycles,
+                            show_machine_result=False
+                        )
+                        delta = neighbor['azure_cfd'] - azure_cfd if neighbor['azure_cfd'] is not None else None
+                        badge_text = f"Higher CFD Δ{delta:+.2f} ({neighbor['azure_cfd']:.2f})" if delta is not None else "Higher CFD"
+                        higher_graphs.append(decorate_graph_container(
+                            neighbor_svg,
+                            extra_classes='neighbor-graph neighbor-higher',
+                            badge_text=badge_text
+                        ))
+
+                    lower_graphs = []
+                    for neighbor in lower_neighbors:
+                        neighbor_readings = get_readings_for_id(conn, neighbor['id'], neighbor['source_table'])
+                        if not neighbor_readings:
+                            continue
+
+                        neighbor_embed_ct_str = f" ({neighbor['embed_ct']:.2f})" if neighbor['embed_ct'] is not None else ""
+                        neighbor_header_suffix = (
+                            f" | Azure: {cls_labels.get(neighbor['azure_cls'], 'N/A') if neighbor['azure_cls'] is not None else 'N/A'}"
+                            f" | Embed: {cls_labels.get(neighbor['embed_cls'], 'N/A') if neighbor['embed_cls'] is not None else 'N/A'}{neighbor_embed_ct_str}"
+                        )
+                        neighbor_metadata = {
+                            'AzureCls': neighbor['azure_cls'],
+                            'AzureCFD': neighbor['azure_cfd'],
+                            'EmbedCls': neighbor['embed_cls'],
+                            'EmbedCt': neighbor['embed_ct'],
+                            'Sample': neighbor['sample'],
+                            'File': neighbor['file'],
+                            'Tube': neighbor['mixtarget'],
+                            'Target': neighbor['target'],
+                            'HeaderSuffix': neighbor_header_suffix
+                        }
+
+                        neighbor_svg = generate_svg_graph(
+                            neighbor['id'],
+                            neighbor_readings,
+                            neighbor_metadata,
+                            show_cfd=show_cfd,
+                            pos_controls=pos_controls,
+                            neg_controls=neg_controls,
+                            baseline_cycles=baseline_cycles,
+                            show_machine_result=False
+                        )
+                        delta = neighbor['azure_cfd'] - azure_cfd if neighbor['azure_cfd'] is not None else None
+                        badge_text = f"Lower CFD Δ{delta:+.2f} ({neighbor['azure_cfd']:.2f})" if delta is not None else "Lower CFD"
+                        lower_graphs.append(decorate_graph_container(
+                            neighbor_svg,
+                            extra_classes='neighbor-graph neighbor-lower',
+                            badge_text=badge_text
+                        ))
+
+                    if higher_graphs or lower_graphs:
+                        target_badge = f"Selected Sample (CFD {azure_cfd:.2f})"
+                        target_graph = decorate_graph_container(
+                            svg_graph,
+                            extra_classes='neighbor-graph target-graph',
+                            badge_text=target_badge
+                        )
+                        combined_graphs = ''.join(higher_graphs + [target_graph] + lower_graphs)
+                        html_content += f'''
+                        <div class="graph-group">
+                            <div class="graph-group-title">
+                                Nearest Neighbours — Mix: {mix}, Target: {mixtarget}
+                            </div>
+                            <div class="graph-group-grid">
+                                {combined_graphs}
+                            </div>
+                        </div>
+                        '''
+                        inserted_group = True
+
+                if not inserted_group:
+                    html_content += svg_graph
 
         except Exception as e:
             print(f"Error processing record {rec_id} from {source_table}: {e}")
             continue
 
     # Close last section div
-    html_content += '</div>\n'
+    if section_open:
+        html_content += '</div>\n'
 
     # Close HTML
     html_content += '''
@@ -952,7 +1288,8 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
     print(f"Total records: {len(records)}")
 
 
-def generate_html_report(conn, records, output_file, show_cfd=False, compare_embed=False, scale_y_axis=True):
+def generate_html_report(conn, records, output_file, show_cfd=False, compare_embed=False,
+                         scale_y_axis=True, baseline_cycles=0):
     """
     Generate HTML report organized by Mix, MixTarget, and classification.
 
@@ -964,6 +1301,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         compare_embed: If True, group by comparison categories (DISCREPANT/EQUIVOCAL/AGREED)
                       instead of just AzureCls
         scale_y_axis: Rescale y-axis when toggling controls (default: True)
+        baseline_cycles: Average the first N cycles for each curve before plotting
     """
 
     html_content = '''
@@ -1474,10 +1812,16 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                     'EmbedCls': embed_cls,
                     'EmbedCt': embed_ct
                 }
-                svg_graph = generate_svg_graph(record_id, readings, metadata, show_cfd=show_cfd,
-                                              pos_controls=pos_controls if pos_controls else None,
-                                              neg_controls=neg_controls if neg_controls else None,
-                                              show_machine_result=compare_embed)
+                svg_graph = generate_svg_graph(
+                    record_id,
+                    readings,
+                    metadata,
+                    show_cfd=show_cfd,
+                    pos_controls=pos_controls if pos_controls else None,
+                    neg_controls=neg_controls if neg_controls else None,
+                    baseline_cycles=baseline_cycles,
+                    show_machine_result=compare_embed
+                )
                 html_content += svg_graph
         except Exception as e:
             print(f"Error processing record {record_id} from {source_table}: {e}")
@@ -1557,11 +1901,22 @@ def main():
     parser.add_argument('--compare-embed', action='store_true',
                        help='Group results by comparison between Azure and embedded machine classifications (DISCREPANT/EQUIVOCAL/AGREED)')
     parser.add_argument('--sample-details', nargs='+', type=int,
-                       help='Generate sample details report for specific sample IDs (shows all targets including IC, with both Azure and Embed results)')
+                       help='Generate sample details report for specific sample IDs (includes IC targets unless --no-ic is used)')
+    parser.add_argument('--no-ic', action='store_true',
+                       help='When used with --sample-details, exclude IC targets from the output')
     parser.add_argument('--dont-scale-y', action='store_true',
                        help='Disable y-axis rescaling when toggling controls (default: y-axis rescales to fit visible data)')
+    parser.add_argument('--add-nearest-neighbour', '--add-nearest-neighbor', dest='add_nearest_neighbour',
+                       type=int, default=0,
+                       help='Show up to N nearest AzureCFD neighbours (higher/lower) for each sample in sample-details mode')
+    parser.add_argument('--baseline', type=int, default=0,
+                       help='Normalize curves by dividing by the average of the first N cycles (default: disabled)')
 
     args = parser.parse_args()
+
+    if args.baseline < 0:
+        print("Error: --baseline must be a non-negative integer")
+        sys.exit(1)
 
     # Check if database exists
     if not Path(args.db).exists():
@@ -1574,10 +1929,12 @@ def main():
     # Sample details mode
     if args.sample_details:
         print(f"Reading records for samples: {args.sample_details}...")
-        records = get_sample_detail_records(conn, args.sample_details)
+        include_ic_samples = not args.no_ic
+        records = get_sample_detail_records(conn, args.sample_details, include_ic=include_ic_samples)
 
         if not records:
-            print(f"No records found for samples: {args.sample_details}")
+            msg = "No records found for samples after applying IC filter." if args.no_ic else f"No records found for samples: {args.sample_details}"
+            print(msg)
             conn.close()
             sys.exit(1)
 
@@ -1585,7 +1942,15 @@ def main():
 
         # Generate sample details report
         scale_y_axis = not args.dont_scale_y
-        generate_sample_details_report(conn, records, args.output, show_cfd=args.show_cfd, scale_y_axis=scale_y_axis)
+        generate_sample_details_report(
+            conn,
+            records,
+            args.output,
+            show_cfd=args.show_cfd,
+            scale_y_axis=scale_y_axis,
+            add_nearest_neighbour=args.add_nearest_neighbour,
+            baseline_cycles=args.baseline
+        )
     else:
         # Standard comparison mode
         filter_msg = "" if args.include_ic else " (excluding IC targets)"
@@ -1601,7 +1966,15 @@ def main():
 
         # Generate HTML report
         scale_y_axis = not args.dont_scale_y
-        generate_html_report(conn, records, args.output, show_cfd=args.show_cfd, compare_embed=args.compare_embed, scale_y_axis=scale_y_axis)
+        generate_html_report(
+            conn,
+            records,
+            args.output,
+            show_cfd=args.show_cfd,
+            compare_embed=args.compare_embed,
+            scale_y_axis=scale_y_axis,
+            baseline_cycles=args.baseline
+        )
 
     conn.close()
     return 0

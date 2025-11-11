@@ -11,6 +11,10 @@ The pipeline processes laboratory reading data through several stages:
 4. **Visualization**: Generate HTML reports for analysis and validation
 5. **PCRAI Export**: Generate PCRAI files for downstream platforms
 
+## Environment Setup
+- First-time setup: `python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt` (if a requirements file exists).
+- Day-to-day usage: reuse the repo-managed environment via `source venv/bin/activate && <python command>` so shared dependencies like `tqdm` are always available.
+
 ## Core Scripts
 
 ### 1. `apply_corrected_cusum_all.py`
@@ -218,8 +222,11 @@ python3 flatten/compare_k_parameters.py --default-k=0.0 --test-k=0.2 --sanity-ch
 - `--sample-details [id1,id2,...]`: Generate report for specific sample IDs (shows all targets)
 - `--show-cfd`: Display Azure confidence values in top-right corner of graphs
 - `--include-ic`: Include IC (internal control) targets (default: excluded)
+- `--no-ic`: When used with `--sample-details`, drop IC targets from the details report
 - `--compare-embed`: Group results by comparison between Azure and embedded machine classifications
 - `--dont-scale-y`: Disable y-axis rescaling when toggling control curves (default: enabled)
+- `--add-nearest-neighbour [n]`: (Sample-details only) show up to *n* higher and lower CFD neighbors for comparison (`--add-nearest-neighbor` alias)
+- `--baseline [n]`: Normalize every curve (main + controls) by the average of the first *n* cycles so controls share a common origin
 
 **Features**:
 - **Control Curves**: Optional positive/negative control curves with toggle visibility
@@ -242,6 +249,9 @@ python3 flatten/generate_azure_report.py --show-cfd --output output_data/azure_r
 # Include IC targets
 python3 flatten/generate_azure_report.py --include-ic --output output_data/azure_report_full.html
 
+# Sample details with IC excluded, nearest neighbours, and baseline normalization
+python3 flatten/generate_azure_report.py --db ~/dbs/readings.db --sample-details 1536470 1536107 --no-ic --add-nearest-neighbour 2 --baseline 6 --output output_data/sample_details_neighbors.html
+
 # Compare with embedded machine results (group by DISCREPANT/EQUIVOCAL/AGREED)
 python3 flatten/generate_azure_report.py --compare-embed --output output_data/azure_embed_comparison.html
 
@@ -260,6 +270,74 @@ python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azu
 - **Smart Scaling**: Y-axis rescales to fit visible curves when controls are shown
 - **Color Legend**: Positive controls (blue dashed), Negative controls (gray dotted)
 - **Responsive Layout**: 5-column grid layout for easy browsing
+
+---
+
+### 9. `import_azure_results.py` ⭐
+**Purpose**: Import Azure classification results or AR (Azure Results) comparison data from CSV
+
+**Parameters**:
+- `--db [path]`: Path to SQLite database file (default: ~/dbs/readings.db)
+- `--csv [path]`: Path to CSV file containing classification results (required)
+- `--table [name]`: Target table to update (default: readings)
+  - Options: `readings`, `test_data`, `flatten`, `flatten_test`
+- `--ar-results`: Import as AR (Azure Results) data instead of Azure data
+- `--dry-run`: Show what would be updated without making changes
+
+**Features**:
+- **Dual Import Modes**:
+  - Standard mode: Imports to `AzureCls`, `AzureAmb`, `AzureCFD` columns
+  - AR Results mode (`--ar-results`): Imports to `ar_cls`, `ar_amb`, `ar_cfd`, `ar_ct` columns
+- **Ambiguity Override**: Automatically sets classification to 2 when ambiguity flag = 1
+- **Sample Validation**: Verifies sample names match between CSV and database
+- **Dry Run Mode**: Preview changes before committing to database
+- **Multi-table Support**: Can import to readings, test_data, flatten, or flatten_test tables
+
+**Column Mapping**:
+- CSV Column → Database Column (Standard Mode) → Database Column (AR Results Mode)
+- AzureCls → AzureCls → ar_cls
+- AzureAmb → AzureAmb → ar_amb
+- AzureCFD → AzureCFD → ar_cfd
+- AzureCT → (ignored) → ar_ct (when present in CSV)
+
+**Usage Examples**:
+```bash
+# Import Azure classification results (standard mode)
+python3 flatten/import_azure_results.py --csv input/azure_results.csv --table readings
+
+# Import AR (Azure Results) data for comparison
+python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table readings --ar-results
+
+# Test import without making changes
+python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table test_data --ar-results --dry-run
+
+# Import to test_data table
+python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table test_data --ar-results
+```
+
+**Database Schema**:
+- **Standard Mode (Azure columns)**: Updates existing Azure columns that were initially populated during database creation
+- **AR Mode (AR columns)**: Updates new columns created specifically for AR results comparison:
+  - `ar_cls` (INTEGER): AR classification result
+  - `ar_amb` (INTEGER): AR ambiguity flag
+  - `ar_cfd` (REAL): AR confidence value
+  - `ar_ct` (REAL): AR Ct (cycle threshold) value
+
+**Output**: Console statistics showing:
+- Total CSV rows processed
+- Records matched in database
+- Records updated
+- Ambiguity overrides applied
+- Sample name mismatches (data quality issues)
+- Records not found in database
+- Detailed error listing (first 10 shown, remainder summarized)
+
+**Use Cases**:
+- Compare Azure predictions vs AR (Azure Results) predictions on same samples
+- Validate consistency between classification systems
+- Identify discrepancies for quality assurance
+
+---
 
 ## CUSUM Parameter Guidelines
 
@@ -376,16 +454,17 @@ All Python scripts support a standardized set of command line parameters for con
 
 ### Parameter Compatibility Matrix
 
-| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob | --sample-details |
-|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|------------------|
-| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
-| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
-| `generate_azure_report.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
-| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob | --sample-details | --show-cfd | --include-ic | --no-ic | --dont-scale-y | --compare-embed | --add-nearest-neighbour | --baseline | --csv | --table | --ar-results | --dry-run |
+|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|------------------|-------------|--------------|---------|---------------|----------------|-----------------------|-----------|-------|-------|------------|-----------|
+| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_azure_report.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅† | ✅ | ✅ | ✅† | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `import_azure_results.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
 
 **Legend:**
 - ✅ = Parameter available
@@ -396,6 +475,7 @@ All Python scripts support a standardized set of command line parameters for con
 - ****Alias for --test-k
 - *****Alias for --k
 - ******Has --add/--remove instead of --ids
+- † Sample-details mode only
 
 ## Dependencies
 
@@ -420,7 +500,7 @@ flatten/
 ├── create_database_from_csv.py           # Database creation
 ├── prepare_test_data.py                  # Test data prep
 ├── import_test_data.py                   # Test data import
-├── import_azure_results.py               # Azure results import
+├── import_azure_results.py               # Azure/AR results import ⭐
 ├── import_pos_controls.py                # Control import
 ├── update_embed_from_csv.py              # Embedding updates
 ├── utils/                                # Shared utility modules
