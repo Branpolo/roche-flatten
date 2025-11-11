@@ -12,12 +12,12 @@ import sys
 from pathlib import Path
 
 
-def get_readings_for_id(conn, record_id, table='readings'):
-    """Get readings for a specific ID"""
+def get_readings_for_id(conn, original_id, source_table):
+    """Get readings for a specific record from all_readings table"""
     cursor = conn.cursor()
     readings_columns = [f"readings{i}" for i in range(44)]
     readings_select = ", ".join(readings_columns)
-    cursor.execute(f"SELECT {readings_select} FROM {table} WHERE id = ?", (record_id,))
+    cursor.execute(f"SELECT {readings_select} FROM all_readings WHERE original_id = ? AND source_table = ?", (original_id, source_table))
     row = cursor.fetchone()
     if not row:
         return []
@@ -28,17 +28,18 @@ def get_readings_for_id(conn, record_id, table='readings'):
 def get_azure_records_with_ar(conn, mix, mixtarget, limit=None):
     """
     Get records with both Azure and AR data for a mix-target, sorted by ranking disagreement.
+    Uses all_readings table exclusively.
 
     Returns list of tuples:
-    (id, Sample, File, AzureCls, AzureCFD, azure_order, ar_cls, ar_cfd, ar_order,
+    (original_id, Sample, File, AzureCls, AzureCFD, azure_order, ar_cls, ar_cfd, ar_order,
      source_table, azure_cls_label, ar_cls_label)
     """
     cursor = conn.cursor()
 
-    # Build query to get records with both Azure and AR data, sorted by ranking disagreement
-    query = f"""
+    # Build query to get records with both Azure and AR data from all_readings, sorted by ranking disagreement
+    query = """
     SELECT
-        id,
+        original_id,
         Sample,
         File,
         AzureCls,
@@ -47,84 +48,142 @@ def get_azure_records_with_ar(conn, mix, mixtarget, limit=None):
         ar_cls,
         ar_cfd,
         ar_order,
-        source_table
-    FROM (
-        SELECT
-            id,
-            Sample,
-            File,
-            AzureCls,
-            AzureCFD,
-            azure_order,
-            ar_cls,
-            ar_cfd,
-            ar_order,
-            'readings' as source_table,
-            ABS(azure_order - ar_order) as rank_diff
-        FROM readings
-        WHERE Mix = ? AND MixTarget = ?
-          AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
-          AND azure_order IS NOT NULL AND ar_order IS NOT NULL
-          AND in_use = 1
-
-        UNION ALL
-
-        SELECT
-            id,
-            Sample,
-            File,
-            AzureCls,
-            AzureCFD,
-            azure_order,
-            ar_cls,
-            ar_cfd,
-            ar_order,
-            'test_data' as source_table,
-            ABS(azure_order - ar_order) as rank_diff
-        FROM test_data
-        WHERE Mix = ? AND MixTarget = ?
-          AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
-          AND azure_order IS NOT NULL AND ar_order IS NOT NULL
-          AND in_use = 1
-    )
+        source_table,
+        AzureAmb,
+        ar_amb,
+        ABS(azure_order - ar_order) as rank_diff
+    FROM all_readings
+    WHERE Mix = ? AND MixTarget = ?
+      AND AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
+      AND azure_order IS NOT NULL AND ar_order IS NOT NULL
+      AND in_use = 1
     ORDER BY rank_diff DESC
     """
 
     if limit:
         query += f" LIMIT {limit}"
 
-    cursor.execute(query, (mix, mixtarget, mix, mixtarget))
+    cursor.execute(query, (mix, mixtarget))
 
     records = []
     for row in cursor.fetchall():
-        rec_id, sample, file, azure_cls, azure_cfd, azure_order, ar_cls, ar_cfd, ar_order, source_table = row
+        orig_id, sample, file, azure_cls, azure_cfd, azure_order, ar_cls, ar_cfd, ar_order, source_table, azure_amb, ar_amb, rank_diff = row
 
         # Convert classifications to labels
         cls_labels = {0: 'NEG', 1: 'POS', 2: 'EQUIV', None: 'N/A'}
-        azure_cls_label = cls_labels.get(azure_cls, 'N/A')
 
-        # Calculate AR classification (like AR system does: if ar_amb==1, cls=2)
-        ar_amb = None
-        if ar_cfd is not None:
-            # We need to get ar_amb from database
-            cursor.execute(f"SELECT ar_amb FROM {source_table} WHERE id = ?", (rec_id,))
-            amb_row = cursor.fetchone()
-            if amb_row:
-                ar_amb = amb_row[0]
+        # Determine Azure classification (amb overrides cls)
+        if azure_amb == 1:
+            azure_cls_calc = 2
+        else:
+            azure_cls_calc = azure_cls
+        azure_cls_label = cls_labels.get(azure_cls_calc, 'N/A')
 
-        # Determine AR classification
+        # Determine AR classification (amb overrides cls)
         if ar_amb == 1:
             ar_cls_calc = 2
         else:
             ar_cls_calc = ar_cls
-
         ar_cls_label = cls_labels.get(ar_cls_calc, 'N/A')
 
         records.append((
-            rec_id, sample, file, azure_cls, azure_cfd, azure_order,
+            orig_id, sample, file, azure_cls_calc, azure_cfd, azure_order,
             ar_cls_calc, ar_cfd, ar_order, source_table,
             azure_cls_label, ar_cls_label
         ))
+
+    return records
+
+
+def get_classification_change_records(conn, mix, mixtarget, exclude_changes=None, limit=None):
+    """
+    Get records where classification changed between Azure and AR.
+    Excludes rows where either AzureCls, AzureAmb, ar_cls, or ar_amb are NULL.
+
+    Args:
+        conn: Database connection
+        mix: Mix name
+        mixtarget: MixTarget name
+        exclude_changes: List of change types to exclude (e.g., ['pos->neg', 'neg->pos'])
+        limit: Maximum number of records per change type to return
+
+    Returns list of tuples:
+    (original_id, Sample, File, AzureCls, AzureCFD, AzureAmb, ar_cls, ar_cfd, ar_amb,
+     source_table, azure_cls_label, ar_cls_label, change_type, cfd_diff)
+    """
+    cursor = conn.cursor()
+
+    # Query with all four columns NOT NULL
+    query = """
+    SELECT
+        original_id,
+        Sample,
+        File,
+        AzureCls,
+        AzureCFD,
+        AzureAmb,
+        ar_cls,
+        ar_cfd,
+        ar_amb,
+        source_table
+    FROM all_readings
+    WHERE Mix = ? AND MixTarget = ?
+      AND AzureCls IS NOT NULL AND AzureAmb IS NOT NULL
+      AND ar_cls IS NOT NULL AND ar_amb IS NOT NULL
+      AND in_use = 1
+    """
+
+    cursor.execute(query, (mix, mixtarget))
+
+    # Classification labels
+    cls_labels = {0: 'NEG', 1: 'POS', 2: 'EQUIV'}
+
+    records = []
+    for row in cursor.fetchall():
+        orig_id, sample, file, azure_cls, azure_cfd, azure_amb, ar_cls, ar_cfd, ar_amb, source_table = row
+
+        # Calculate effective classifications (amb=1 overrides cls)
+        azure_cls_calc = 2 if azure_amb == 1 else azure_cls
+        ar_cls_calc = 2 if ar_amb == 1 else ar_cls
+
+        # Skip if classifications match
+        if azure_cls_calc == ar_cls_calc:
+            continue
+
+        # Determine change type
+        azure_label = cls_labels[azure_cls_calc]
+        ar_label = cls_labels[ar_cls_calc]
+        change_type = f"{azure_label.lower()}->{ar_label.lower()}"
+
+        # Skip if this change type is excluded
+        if exclude_changes and change_type in exclude_changes:
+            continue
+
+        cfd_diff = abs(azure_cfd - ar_cfd)
+
+        records.append((
+            orig_id, sample, file, azure_cls_calc, azure_cfd, azure_amb,
+            ar_cls_calc, ar_cfd, ar_amb, source_table,
+            azure_label, ar_label, change_type, cfd_diff
+        ))
+
+    # Sort by change type, then by CFD difference descending
+    records.sort(key=lambda x: (x[12], -x[13]))
+
+    # Apply limit if specified - apply limit PER change type
+    if limit:
+        limited_records = []
+        change_type_counts = {}
+        for record in records:
+            change_type = record[12]
+            if change_type not in change_type_counts:
+                change_type_counts[change_type] = 0
+
+            if change_type_counts[change_type] < limit:
+                limited_records.append(record)
+                change_type_counts[change_type] += 1
+
+        records = limited_records
 
     return records
 
@@ -212,15 +271,17 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180):
     return svg, metadata
 
 
-def generate_comparison_report(conn, output_file, compare_count=10, include_ic=True):
+def generate_comparison_report(conn, output_file, compare_count=None, include_ic=True, show_classification_changes=False, exclude_change_type=None):
     """
     Generate comparison report of Azure vs AR results.
 
     Args:
         conn: Database connection
         output_file: Output HTML file path
-        compare_count: Number of top disagreement samples per target to show
+        compare_count: Limit samples per change type (default: None = show all)
         include_ic: Include IC targets (default: False, exclude IC)
+        show_classification_changes: Show classification changes instead of ranking disagreements
+        exclude_change_type: List of change types to exclude (e.g., ['pos->neg'])
     """
 
     # Get mix-target combinations (exclude IC if specified)
@@ -228,30 +289,46 @@ def generate_comparison_report(conn, output_file, compare_count=10, include_ic=T
     ic_filter = "" if include_ic else "AND MixTarget != 'IC'"
     cursor.execute(f"""
         SELECT DISTINCT Mix, MixTarget
-        FROM readings
-        WHERE AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL AND azure_order IS NOT NULL
+        FROM all_readings
+        WHERE AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
               {ic_filter}
         ORDER BY Mix, MixTarget
     """)
 
     combinations = cursor.fetchall()
 
-    html_content = '''
+    # Determine report title and header text based on mode
+    if show_classification_changes:
+        report_title = "Azure vs AR Classification Changes Report"
+        report_subtitle = "Classification differences between algorithms"
+        header_note = "Showing samples where classification differs between Azure and AR algorithms"
+    else:
+        report_title = "Azure vs AR Comparison Report"
+        report_subtitle = "Top disagreement samples per Mix-Target combination"
+        header_note = """
+        <div class="warning">
+            <strong>⚠️ Key Finding:</strong> AR and Azure CFD scales appear inverted!
+            <br/>AR ranks POS controls LOW (correctly by CFD polarity) but Azure ranks them HIGH (opposite)
+            <br/>This suggests AR uses opposite CFD polarity convention vs Azure
+        </div>
+        """
+
+    html_content = f'''
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Azure vs AR Comparison Report</title>
+        <title>{report_title}</title>
         <style>
-            body {
+            body {{
                 font-family: Arial, sans-serif;
                 margin: 10px;
                 background-color: #f5f5f5;
-            }
-            .header {
+            }}
+            .header {{
                 text-align: center;
                 margin: 20px 0;
-            }
-            h1 {
+            }}
+            h1 {{
                 text-align: center;
                 margin: 30px 0 20px 0;
                 padding: 20px;
@@ -259,8 +336,8 @@ def generate_comparison_report(conn, output_file, compare_count=10, include_ic=T
                 color: white;
                 border-radius: 8px;
                 font-size: 1.8em;
-            }
-            h2 {
+            }}
+            h2 {{
                 text-align: center;
                 margin: 30px 0 15px 0;
                 padding: 15px;
@@ -268,28 +345,37 @@ def generate_comparison_report(conn, output_file, compare_count=10, include_ic=T
                 color: white;
                 border-radius: 8px;
                 font-size: 1.4em;
-            }
-            .container {
+            }}
+            h3 {{
+                text-align: left;
+                margin: 20px 0 10px 0;
+                padding: 10px;
+                background: #5d6d7b;
+                color: white;
+                border-radius: 4px;
+                font-size: 1.1em;
+            }}
+            .container {{
                 display: grid;
                 grid-template-columns: repeat(5, 1fr);
                 gap: 8px;
                 max-width: 1400px;
                 margin: 0 auto;
-            }
-            .graph-container {
+            }}
+            .graph-container {{
                 background: white;
                 border: 1px solid #ddd;
                 border-radius: 4px;
                 padding: 4px;
                 text-align: center;
-            }
-            .graph-header {
+            }}
+            .graph-header {{
                 font-size: 10px;
                 margin-bottom: 4px;
                 color: #333;
                 font-weight: bold;
-            }
-            .result-box {
+            }}
+            .result-box {{
                 font-size: 8px;
                 margin-top: 6px;
                 padding: 6px;
@@ -298,33 +384,41 @@ def generate_comparison_report(conn, output_file, compare_count=10, include_ic=T
                 border-radius: 3px;
                 text-align: center;
                 line-height: 1.4;
-            }
-            .result-box .label {
+            }}
+            .result-box .label {{
                 font-weight: bold;
                 color: #2c3e50;
                 margin-bottom: 4px;
                 border-bottom: 1px solid #bdc3c7;
                 padding-bottom: 3px;
-            }
-            .result-box .azure {
+            }}
+            .result-box .azure {{
                 color: #3498db;
                 font-weight: bold;
                 margin-top: 3px;
-            }
-            .result-box .ar {
+            }}
+            .result-box .ar {{
                 color: #e67e22;
                 font-weight: bold;
                 margin-top: 3px;
-            }
-            .rank-diff {
+            }}
+            .rank-diff {{
                 font-size: 7px;
                 color: #c0392b;
                 font-weight: bold;
                 margin-top: 4px;
                 padding-top: 3px;
                 border-top: 1px solid #bdc3c7;
-            }
-            .stats {
+            }}
+            .cfd-diff {{
+                font-size: 7px;
+                color: #2980b9;
+                font-weight: bold;
+                margin-top: 4px;
+                padding-top: 3px;
+                border-top: 1px solid #bdc3c7;
+            }}
+            .stats {{
                 grid-column: 1 / -1;
                 text-align: center;
                 margin: 10px 0;
@@ -332,83 +426,137 @@ def generate_comparison_report(conn, output_file, compare_count=10, include_ic=T
                 background: #ecf0f1;
                 border-radius: 4px;
                 color: #2c3e50;
-            }
-            .warning {
+            }}
+            .warning {{
                 color: #c0392b;
                 font-size: 0.9em;
-            }
+            }}
         </style>
     </head>
     <body>
         <div class="header">
-            <h1>Azure vs AR Comparison Report</h1>
-            <p style="color: #666;">Top disagreement samples per Mix-Target combination</p>
-            <div class="warning">
-                <strong>⚠️ Key Finding:</strong> AR and Azure CFD scales appear inverted!
-                <br/>AR ranks POS controls LOW (correctly by CFD polarity) but Azure ranks them HIGH (opposite)
-                <br/>This suggests AR uses opposite CFD polarity convention vs Azure
-            </div>
+            <h1>{report_title}</h1>
+            <p style="color: #666;">{report_subtitle}</p>
+            {header_note}
         </div>
         <div class="container">
     '''
 
-    print(f"Generating comparison report for {len(combinations)} mix-target combinations...")
+    print(f"Generating {report_title} for {len(combinations)} mix-target combinations...")
 
     for mix, mixtarget in combinations:
         print(f"  Processing {mix}-{mixtarget}...")
 
-        # Get top comparison samples
-        records = get_azure_records_with_ar(conn, mix, mixtarget, limit=compare_count)
+        if show_classification_changes:
+            # Get classification change records
+            records = get_classification_change_records(conn, mix, mixtarget, exclude_changes=exclude_change_type, limit=compare_count)
+            if not records:
+                continue
 
-        if not records:
-            continue
+            html_content += f'<h2>{mix} - {mixtarget}</h2>'
 
-        html_content += f'''
-            <h2>{mix} - {mixtarget}</h2>
-            <div class="stats">
-                Showing top {len(records)} samples with largest ranking disagreements
-            </div>
-        '''
+            # Group by change type
+            changes_dict = {}
+            for record in records:
+                change_type = record[12]
+                if change_type not in changes_dict:
+                    changes_dict[change_type] = []
+                changes_dict[change_type].append(record)
 
-        for rec_id, sample, file, azure_cls, azure_cfd, azure_order, ar_cls, ar_cfd, ar_order, source_table, azure_cls_label, ar_cls_label in records:
-            try:
-                readings = get_readings_for_id(conn, rec_id, source_table)
-                if not readings:
-                    continue
-
-                rank_diff = abs(azure_order - ar_order)
-
-                metadata = {
-                    'AzureCls': azure_cls,
-                    'AzureCFD': azure_cfd,
-                    'Sample': sample,
-                    'File': file
-                }
-
-                svg_graph, _ = generate_svg_graph(rec_id, readings, metadata)
-
-                # Build result box - OUTSIDE the container div
-                result_html = f'''
-                <div class="result-box">
-                    <div class="label">AZURE vs AR</div>
-                    <div class="azure">
-                        Azure: {azure_cls_label}<br/>CFD: {azure_cfd:.2f}<br/>Rank: {azure_order}
-                    </div>
-                    <div class="ar">
-                        AR: {ar_cls_label}<br/>CFD: {ar_cfd:.2f}<br/>Rank: {ar_order}
-                    </div>
-                    <div class="rank-diff">Δ Rank: {rank_diff}</div>
+            # Display each change type as a section
+            for change_type in sorted(changes_dict.keys()):
+                change_records = changes_dict[change_type]
+                html_content += f'<h3>Classification Change: {change_type.upper()}</h3>'
+                html_content += f'''
+                <div class="stats">
+                    {len(change_records)} samples with {change_type} change, sorted by CFD difference
                 </div>
                 '''
 
-                # Combine SVG and results
-                combined = svg_graph.rstrip() + '\n' + result_html
+                for orig_id, sample, file, azure_cls, azure_cfd, azure_amb, ar_cls, ar_cfd, ar_amb, source_table, azure_label, ar_label, change_type_str, cfd_diff in change_records:
+                    try:
+                        readings = get_readings_for_id(conn, orig_id, source_table)
+                        if not readings:
+                            continue
 
-                html_content += combined
+                        metadata = {
+                            'AzureCls': azure_cls,
+                            'AzureCFD': azure_cfd,
+                            'Sample': sample,
+                            'File': file
+                        }
 
-            except Exception as e:
-                print(f"    Error processing record {rec_id}: {e}")
+                        svg_graph, _ = generate_svg_graph(orig_id, readings, metadata)
+
+                        result_html = f'''
+                        <div class="result-box">
+                            <div class="label">AZURE vs AR</div>
+                            <div class="azure">
+                                Azure: {azure_label}<br/>CFD: {azure_cfd:.2f}
+                            </div>
+                            <div class="ar">
+                                AR: {ar_label}<br/>CFD: {ar_cfd:.2f}
+                            </div>
+                            <div class="cfd-diff">Δ CFD: {cfd_diff:.2f}</div>
+                        </div>
+                        '''
+
+                        combined = svg_graph.rstrip() + '\n' + result_html
+                        html_content += combined
+
+                    except Exception as e:
+                        print(f"    Error processing record {orig_id}: {e}")
+                        continue
+
+        else:
+            # Original ranking-based mode
+            records = get_azure_records_with_ar(conn, mix, mixtarget, limit=compare_count)
+            if not records:
                 continue
+
+            html_content += f'''
+                <h2>{mix} - {mixtarget}</h2>
+                <div class="stats">
+                    Showing top {len(records)} samples with largest ranking disagreements
+                </div>
+            '''
+
+            for orig_id, sample, file, azure_cls, azure_cfd, azure_order, ar_cls, ar_cfd, ar_order, source_table, azure_cls_label, ar_cls_label in records:
+                try:
+                    readings = get_readings_for_id(conn, orig_id, source_table)
+                    if not readings:
+                        continue
+
+                    rank_diff = abs(azure_order - ar_order)
+
+                    metadata = {
+                        'AzureCls': azure_cls,
+                        'AzureCFD': azure_cfd,
+                        'Sample': sample,
+                        'File': file
+                    }
+
+                    svg_graph, _ = generate_svg_graph(orig_id, readings, metadata)
+
+                    result_html = f'''
+                    <div class="result-box">
+                        <div class="label">AZURE vs AR</div>
+                        <div class="azure">
+                            Azure: {azure_cls_label}<br/>CFD: {azure_cfd:.2f}<br/>Rank: {azure_order}
+                        </div>
+                        <div class="ar">
+                            AR: {ar_cls_label}<br/>CFD: {ar_cfd:.2f}<br/>Rank: {ar_order}
+                        </div>
+                        <div class="rank-diff">Δ Rank: {rank_diff}</div>
+                    </div>
+                    '''
+
+                    combined = svg_graph.rstrip() + '\n' + result_html
+                    html_content += combined
+
+                except Exception as e:
+                    print(f"    Error processing record {orig_id}: {e}")
+                    continue
 
     html_content += '''
         </div>
@@ -431,10 +579,15 @@ def main():
                        help='Path to SQLite database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', default='output_data/az_ar_comparison.html',
                        help='Output HTML file path (default: output_data/az_ar_comparison.html)')
-    parser.add_argument('--compare-az-ar', type=int, default=10,
-                       help='Number of top disagreement samples per mix-target to show (default: 10)')
+    parser.add_argument('--compare-az-ar', type=int, default=None,
+                       help='Limit number of samples per change type to show (default: show all)')
     parser.add_argument('--no-ic', action='store_true',
                        help='Exclude IC (internal control) targets (default: included)')
+    parser.add_argument('--show-classification-changes', action='store_true',
+                       help='Show classification changes instead of ranking disagreements')
+    parser.add_argument('--exclude-change-type', nargs='+',
+                       choices=['pos->neg', 'neg->pos', 'pos->amb', 'neg->amb', 'amb->pos', 'amb->neg'],
+                       help='Exclude specific change types (e.g., pos->neg neg->pos)')
 
     args = parser.parse_args()
 
@@ -449,13 +602,16 @@ def main():
     conn = sqlite3.connect(str(db_path))
 
     include_ic = not args.no_ic
+    exclude_changes = set(args.exclude_change_type) if args.exclude_change_type else None
 
     # Generate report
     generate_comparison_report(
         conn,
         args.output,
         compare_count=args.compare_az_ar,
-        include_ic=include_ic
+        include_ic=include_ic,
+        show_classification_changes=args.show_classification_changes,
+        exclude_change_type=exclude_changes
     )
 
     conn.close()

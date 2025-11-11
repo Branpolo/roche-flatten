@@ -1,0 +1,5 @@
+usage: compare_az_ar_curves.py [-h] [--db DB] [--output OUTPUT]
+                               [--compare-az-ar COMPARE_AZ_AR] [--no-ic]
+                               [--show-classification-changes]
+                               [--exclude-change-type {pos->neg,neg->pos,pos->amb,neg->amb,amb->pos,amb->neg} [{pos->neg,neg->pos,pos->amb,neg->amb,amb->pos,amb->neg} ...]]
+compare_az_ar_curves.py: error: argument --exclude-change-type: invalid choice: 'pos-' (choose from 'pos->neg', 'neg->pos', 'pos->amb', 'neg->amb', 'amb->pos', 'amb->neg')

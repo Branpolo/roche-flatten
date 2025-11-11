@@ -28,7 +28,7 @@ def parse_args():
     parser.add_argument('--csv', required=True,
                        help='Path to CSV file containing Azure/AR results')
     parser.add_argument('--table', default='readings',
-                       choices=['readings', 'test_data', 'flatten', 'flatten_test'],
+                       choices=['readings', 'test_data', 'flatten', 'flatten_test', 'all_readings'],
                        help='Table to update (default: readings)')
     parser.add_argument('--ar-results', action='store_true',
                        help='Import as AR (Azure Results) data instead of Azure data')
@@ -150,6 +150,10 @@ def main():
                 except (ValueError, IndexError):
                     ct_val = None
 
+            # Skip if AzureCFD is NULL (required for reimport)
+            if cfd is None:
+                continue
+
             # Apply the rule: if Amb == 1, override Cls to 2
             if amb == 1:
                 cls = 2
@@ -157,19 +161,23 @@ def main():
             else:
                 cls = cls_csv
 
-            # Skip if both cls and cfd are None
-            if cls is None and cfd is None:
-                continue
-
             # Create unique identifier (using File instead of FileUID)
             unique_id = f"{csv_file}-{csv_tube}-{csv_mix}-{csv_mixtarget}"
 
             # Find matching record in database using File column
-            cursor.execute(f"""
-                SELECT id, Sample
-                FROM {args.table}
-                WHERE File = ? AND Tube = ? AND Mix = ? AND MixTarget = ?
-            """, (csv_file, csv_tube, csv_mix, csv_mixtarget))
+            # Note: all_readings uses rowid, while other tables use id
+            if args.table == 'all_readings':
+                cursor.execute(f"""
+                    SELECT rowid, Sample
+                    FROM {args.table}
+                    WHERE File = ? AND Tube = ? AND Mix = ? AND MixTarget = ?
+                """, (csv_file, csv_tube, csv_mix, csv_mixtarget))
+            else:
+                cursor.execute(f"""
+                    SELECT id, Sample
+                    FROM {args.table}
+                    WHERE File = ? AND Tube = ? AND Mix = ? AND MixTarget = ?
+                """, (csv_file, csv_tube, csv_mix, csv_mixtarget))
 
             result = cursor.fetchone()
 
@@ -188,26 +196,29 @@ def main():
 
                 # Update the record
                 if not args.dry_run:
+                    # Determine WHERE clause based on table
+                    where_clause = "WHERE rowid = ?" if args.table == 'all_readings' else "WHERE id = ?"
+
                     if args.ar_results:
                         # Update AR columns
                         if ct_val is not None:
                             cursor.execute(f"""
                                 UPDATE {args.table}
                                 SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?, {ct_col} = ?
-                                WHERE id = ?
+                                {where_clause}
                             """, (cls, amb, cfd, ct_val, db_id))
                         else:
                             cursor.execute(f"""
                                 UPDATE {args.table}
                                 SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?
-                                WHERE id = ?
+                                {where_clause}
                             """, (cls, amb, cfd, db_id))
                     else:
                         # Update Azure columns
                         cursor.execute(f"""
                             UPDATE {args.table}
                             SET {cls_col} = ?, {amb_col} = ?, {cfd_col} = ?
-                            WHERE id = ?
+                            {where_clause}
                         """, (cls, amb, cfd, db_id))
                     stats['updated'] += 1
                 else:

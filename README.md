@@ -227,6 +227,7 @@ python3 flatten/compare_k_parameters.py --default-k=0.0 --test-k=0.2 --sanity-ch
 - `--dont-scale-y`: Disable y-axis rescaling when toggling control curves (default: enabled)
 - `--add-nearest-neighbour [n]`: (Sample-details only) show up to *n* higher and lower CFD neighbors for comparison (`--add-nearest-neighbor` alias)
 - `--baseline [n]`: Normalize every curve (main + controls) by the average of the first *n* cycles so controls share a common origin
+- `--compare-embed-ar`: Compare AR (Azure Results) classification with embedded machine classifications instead of Azure with Embed (alternative to `--compare-embed`)
 
 **Features**:
 - **Control Curves**: Optional positive/negative control curves with toggle visibility
@@ -255,6 +256,9 @@ python3 flatten/generate_azure_report.py --db ~/dbs/readings.db --sample-details
 # Compare with embedded machine results (group by DISCREPANT/EQUIVOCAL/AGREED)
 python3 flatten/generate_azure_report.py --compare-embed --output output_data/azure_embed_comparison.html
 
+# Compare AR with embedded machine results (group by DISCREPANT/EQUIVOCAL/AGREED)
+python3 flatten/generate_azure_report.py --compare-embed-ar --output output_data/ar_embed_comparison.html
+
 # Disable y-axis rescaling (keep fixed scale)
 python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azure_report_fixed_scale.html
 ```
@@ -280,7 +284,7 @@ python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azu
 - `--db [path]`: Path to SQLite database file (default: ~/dbs/readings.db)
 - `--csv [path]`: Path to CSV file containing classification results (required)
 - `--table [name]`: Target table to update (default: readings)
-  - Options: `readings`, `test_data`, `flatten`, `flatten_test`
+  - Options: `readings`, `test_data`, `flatten`, `flatten_test`, `all_readings`
 - `--ar-results`: Import as AR (Azure Results) data instead of Azure data
 - `--dry-run`: Show what would be updated without making changes
 
@@ -291,7 +295,7 @@ python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azu
 - **Ambiguity Override**: Automatically sets classification to 2 when ambiguity flag = 1
 - **Sample Validation**: Verifies sample names match between CSV and database
 - **Dry Run Mode**: Preview changes before committing to database
-- **Multi-table Support**: Can import to readings, test_data, flatten, or flatten_test tables
+- **Multi-table Support**: Can import to readings, test_data, flatten, flatten_test, or all_readings tables
 
 **Column Mapping**:
 - CSV Column → Database Column (Standard Mode) → Database Column (AR Results Mode)
@@ -302,13 +306,19 @@ python3 flatten/generate_azure_report.py --dont-scale-y --output output_data/azu
 
 **Usage Examples**:
 ```bash
-# Import Azure classification results (standard mode)
+# Import Azure classification results to readings table
 python3 flatten/import_azure_results.py --csv input/azure_results.csv --table readings
 
-# Import AR (Azure Results) data for comparison
+# Import Azure results to all_readings table
+python3 flatten/import_azure_results.py --csv flatten/input/ebv_az_updates.csv --table all_readings
+
+# Import AR (Azure Results) data for comparison to readings table
 python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table readings --ar-results
 
-# Test import without making changes
+# Import AR results to all_readings table
+python3 flatten/import_azure_results.py --csv flatten/input/ar_results2.csv --table all_readings --ar-results
+
+# Test import without making changes (dry-run)
 python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table test_data --ar-results --dry-run
 
 # Import to test_data table
@@ -336,6 +346,80 @@ python3 flatten/import_azure_results.py --csv input/ar_results1.csv --table test
 - Compare Azure predictions vs AR (Azure Results) predictions on same samples
 - Validate consistency between classification systems
 - Identify discrepancies for quality assurance
+
+---
+
+### 10. `compare_az_ar_curves.py` ⭐
+**Purpose**: Generate comparison reports between Azure and AR (Azure Results) classification algorithms
+
+**Features**:
+- **Dual Comparison Modes**:
+  - **Ranking Mode** (default): Shows samples with largest ranking disagreements between Azure and AR CFD rankings
+  - **Classification Changes Mode**: Shows samples where actual classification differs between Azure and AR (boundary cases)
+- **Classification States**: Handles NEG (0), POS (1), and EQUIV (2, derived from ambiguity flag)
+- **Null Filtering**: Excludes rows where any of `AzureCls`, `AzureAmb`, `ar_cls`, or `ar_amb` are NULL
+- **Flexible Filtering**: Can exclude specific change types to focus on transitions of interest
+
+**Parameters**:
+- `--db [path]`: Path to SQLite database file (default: ~/dbs/readings.db)
+- `--output [path]`: Output HTML file path (default: output_data/az_ar_comparison.html)
+- `--compare-az-ar [n]`: Limit samples per change type (default: no limit, show all)
+- `--no-ic`: Exclude IC (internal control) targets (default: included)
+- `--show-classification-changes`: Show classification changes instead of ranking disagreements
+- `--exclude-change-type [type1 type2 ...]`: Exclude specific change types (space-separated)
+  - Available types: `pos->neg`, `neg->pos`, `pos->amb`, `neg->amb`, `amb->pos`, `amb->neg`
+
+**Classification Logic**:
+- **Effective Classification**: Ambiguity flag (amb=1) overrides cls value (0 or 1)
+  - If `AzureAmb=1` → Azure classification = EQUIV (2)
+  - If `ar_amb=1` → AR classification = EQUIV (2)
+  - Otherwise: Use `AzureCls` or `ar_cls` value directly
+- **Change Type Notation**: `az->ar` (e.g., `pos->neg` means Azure=POS, AR=NEG)
+
+**Usage Examples**:
+```bash
+# Default ranking mode - show largest ranking disagreements
+python3 flatten/compare_az_ar_curves.py
+
+# Show all classification changes (boundary cases)
+python3 flatten/compare_az_ar_curves.py --show-classification-changes
+
+# Show classification changes with limit of 10 samples per change type
+python3 flatten/compare_az_ar_curves.py --show-classification-changes --compare-az-ar 10
+
+# Focus on specific change types (exclude others)
+python3 flatten/compare_az_ar_curves.py --show-classification-changes --exclude-change-type pos->neg neg->pos
+
+# Exclude IC targets, show up to 20 samples per change type
+python3 flatten/compare_az_ar_curves.py --show-classification-changes --no-ic --compare-az-ar 20
+
+# Custom database and output
+python3 flatten/compare_az_ar_curves.py --db /path/to/db.sqlite --output output_data/custom_comparison.html
+
+# Show only ambiguity transitions
+python3 flatten/compare_az_ar_curves.py --show-classification-changes --exclude-change-type pos->neg neg->pos pos->amb neg->amb
+
+# Show only positive/negative transitions (exclude ambiguity)
+python3 flatten/compare_az_ar_curves.py --show-classification-changes --exclude-change-type pos->amb neg->amb amb->pos amb->neg
+```
+
+**Output Structure**:
+- **Ranking Mode**:
+  - Curves organized by Mix-Target
+  - Sorted by absolute ranking difference (highest first)
+  - Shows Azure CFD, Rank, AR CFD, Rank, and rank difference
+- **Classification Changes Mode**:
+  - Curves organized by Mix-Target, then by change type
+  - Grouped sections for each change type (pos→neg, neg→pos, etc.)
+  - Within each section, sorted by CFD difference (highest first)
+  - Shows Azure CFD, AR CFD, and CFD difference
+  - Includes curve visualization with color-coded by Azure classification
+
+**Use Cases**:
+- **Identify Boundary Cases**: See where Azure and AR disagree on classification
+- **Algorithm Comparison**: Understand fundamental differences between Azure and AR
+- **Parameter Tuning**: Find threshold adjustments needed to align predictions
+- **Quality Assurance**: Identify cases where one algorithm may be more robust than the other
 
 ---
 
@@ -454,17 +538,18 @@ All Python scripts support a standardized set of command line parameters for con
 
 ### Parameter Compatibility Matrix
 
-| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob | --sample-details | --show-cfd | --include-ic | --no-ic | --dont-scale-y | --compare-embed | --add-nearest-neighbour | --baseline | --csv | --table | --ar-results | --dry-run |
-|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|------------------|-------------|--------------|---------|---------------|----------------|-----------------------|-----------|-------|-------|------------|-----------|
-| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `generate_azure_report.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅† | ✅ | ✅ | ✅† | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `import_azure_results.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| Script | --all | --files | --db | --output | --k | --default-k | --test-k | --threshold | --ids | --example-dataset | --limit | --sort-order | --sort-by | --sanity-check-slope | --sanity-lob | --sample-details | --show-cfd | --include-ic | --no-ic | --dont-scale-y | --compare-embed | --compare-embed-ar | --add-nearest-neighbour | --baseline | --csv | --table | --ar-results | --dry-run | --show-classification-changes | --exclude-change-type | --compare-az-ar |
+|--------|-------|---------|------|----------|-----|-------------|----------|-------------|-------|-------------------|---------|--------------|-----------|---------------------|--------------|------------------|-------------|--------------|---------|---------------|----------------|-----------------------|-----------|-------|-------|------------|-----------|------------------------------|--------|
+| `apply_corrected_cusum_all.py` | ❌* | ❌* | ✅ | ✅ | ✅ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `create_flattened_database_fast.py` | ❌* | ❌* | ✅ | ❌** | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_database_flattened_html_fixed.py` | ❌* | ❌* | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_pcrai_from_db.py` | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌*** | ❌*** | ❌*** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `compare_k_parameters.py` | ✅ | ❌* | ✅ | ✅ | ✅**** | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_flattened_cusum_html.py` | ✅ | ❌* | ✅ | ✅ | ✅ | ✅***** | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `generate_azure_report.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅† | ✅ | ✅ | ✅ | ✅† | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `manage_example_ids.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌****** | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `import_azure_results.py` | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | ❌ |
+| `compare_az_ar_curves.py` | ❌ | ❌ | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ | ✅ |
 
 **Legend:**
 - ✅ = Parameter available
@@ -501,6 +586,7 @@ flatten/
 ├── prepare_test_data.py                  # Test data prep
 ├── import_test_data.py                   # Test data import
 ├── import_azure_results.py               # Azure/AR results import ⭐
+├── compare_az_ar_curves.py               # Azure vs AR comparison report ⭐
 ├── import_pos_controls.py                # Control import
 ├── update_embed_from_csv.py              # Embedding updates
 ├── utils/                                # Shared utility modules

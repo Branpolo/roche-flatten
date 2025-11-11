@@ -433,6 +433,123 @@ def get_azure_records(conn, include_ic=False, compare_embed=False):
     return cursor.fetchall()
 
 
+def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
+    """
+    Get all records with AR (Azure Results) classification results from BOTH readings and test_data.
+
+    When compare_embed_ar=False: Sorted by Mix, MixTarget, AR_cls (1,0,2), ar_cfd
+    When compare_embed_ar=True: Sorted by comparison category, Mix, MixTarget, AR_cls, ar_cfd
+
+    Args:
+        include_ic: If False (default), exclude IC (internal control) targets
+        compare_embed_ar: If True, order by comparison category first
+
+    Returns:
+        List of tuples: (id, Mix, MixTarget, Target, ar_cls, ar_cfd, ar_amb, Sample,
+                        File, FileUID, Tube, EmbedCls, EmbedCt, source_table)
+    """
+    cursor = conn.cursor()
+
+    # Build WHERE clause for IC filtering
+    ic_filter = "" if include_ic else "AND MixTarget NOT LIKE '%IC%'"
+
+    # Build ORDER BY clause based on compare_embed_ar mode
+    if compare_embed_ar:
+        # Primary sort by comparison category: DISCREPANT, EQUIVOCAL, AGREED, NO_EMBED
+        # Calculate effective AR classification (amb=1 overrides cls)
+        order_by = """
+        ORDER BY
+            -- Comparison category order: DISCREPANT, EQUIVOCAL, AGREED, NO_EMBED
+            CASE
+                WHEN ar_amb = 1 THEN 2  -- EQUIVOCAL (amb overrides cls)
+                WHEN ar_cls IS NOT NULL AND ar_amb != 1 AND EmbedCls IS NOT NULL AND EmbedCls != ar_cls THEN 1  -- DISCREPANT
+                WHEN ar_cls IS NOT NULL AND EmbedCls IS NOT NULL THEN 3  -- AGREED
+                WHEN ar_cls IS NOT NULL AND EmbedCls IS NULL THEN 4  -- NO_EMBED
+                ELSE 5
+            END,
+            Mix,
+            MixTarget,
+            CASE WHEN ar_amb = 1 THEN 2 ELSE ar_cls END,  -- Effective classification
+            ar_cfd ASC  -- Low confidence first within each class
+        """
+    else:
+        # Original ordering: Mix, MixTarget, AR_cls (effective, amb overrides), ar_cfd
+        order_by = """
+        ORDER BY
+            Mix,
+            MixTarget,
+            CASE WHEN ar_amb = 1 THEN 2 ELSE ar_cls END,  -- Effective AR classification
+            ar_cfd ASC  -- Low confidence first within each class
+        """
+
+    # Query readings table first
+    query_parts = []
+
+    query_parts.append(f"""
+    SELECT
+        id,
+        Mix,
+        MixTarget,
+        Target,
+        ar_cls,
+        ar_cfd,
+        ar_amb,
+        Sample,
+        File,
+        FileUID,
+        Tube,
+        EmbedCls,
+        EmbedCt,
+        'readings' as source_table
+    FROM readings
+    WHERE ar_cls IS NOT NULL
+      AND ar_amb IS NOT NULL
+      AND ar_cfd IS NOT NULL
+      AND in_use = 1
+      {ic_filter}
+    """)
+
+    # Try to add test_data table if it exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='test_data'")
+    has_test_data = cursor.fetchone() is not None
+
+    if has_test_data:
+        query_parts.append(f"""
+    SELECT
+        id,
+        Mix,
+        MixTarget,
+        Target,
+        ar_cls,
+        ar_cfd,
+        ar_amb,
+        Sample,
+        File,
+        FileUID,
+        Tube,
+        EmbedCls,
+        EmbedCt,
+        'test_data' as source_table
+    FROM test_data
+    WHERE ar_cls IS NOT NULL
+      AND ar_amb IS NOT NULL
+      AND ar_cfd IS NOT NULL
+      AND in_use = 1
+      {ic_filter}
+    """)
+
+    # Combine all queries
+    if len(query_parts) > 1:
+        query = " UNION ALL ".join(query_parts)
+    else:
+        query = query_parts[0]
+
+    query = f"SELECT * FROM ({query}) {order_by}"
+
+    cursor.execute(query)
+    return cursor.fetchall()
+
+
 def classify_comparison(azure_cls, embed_cls):
     """
     Classify a record based on comparison between Azure and embedded machine classifications.
@@ -457,6 +574,40 @@ def classify_comparison(azure_cls, embed_cls):
         return 'DISCREPANT'
 
     # AGREED: Everything else (Azure agrees with machine)
+    return 'AGREED'
+
+
+def classify_ar_comparison(ar_amb, ar_cls, embed_cls):
+    """
+    Classify a record based on comparison between AR (Azure Results) and embedded machine classifications.
+
+    Args:
+        ar_amb: AR ambiguity flag (0=not ambiguous, 1=ambiguous)
+        ar_cls: AR classification (0=Negative, 1=Positive)
+        embed_cls: Embedded machine classification (0=Negative, 1=Positive, None=Not classified)
+
+    Returns:
+        str: One of 'DISCREPANT', 'EQUIVOCAL', 'AGREED', 'NO_EMBED'
+    """
+    # Calculate effective AR classification (amb=1 overrides cls)
+    if ar_amb == 1:
+        ar_cls_calc = 2  # EQUIV
+    else:
+        ar_cls_calc = ar_cls
+
+    # EQUIVOCAL: AR says ambiguous
+    if ar_cls_calc == 2:
+        return 'EQUIVOCAL'
+
+    # NO_EMBED: Has AR classification but no machine result
+    if ar_cls_calc is not None and embed_cls is None:
+        return 'NO_EMBED'
+
+    # DISCREPANT: AR disagrees with machine (excluding ambiguous/null cases)
+    if ar_cls_calc is not None and ar_cls_calc != 2 and embed_cls is not None and embed_cls != ar_cls_calc:
+        return 'DISCREPANT'
+
+    # AGREED: Everything else (AR agrees with machine)
     return 'AGREED'
 
 
@@ -1288,6 +1439,606 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
     print(f"Total records: {len(records)}")
 
 
+def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_embed_ar=False,
+                            scale_y_axis=True, baseline_cycles=0):
+    """
+    Generate HTML report organized by Mix, MixTarget, and AR classification.
+
+    Similar to generate_html_report but uses AR (Azure Results) classification instead of Azure.
+
+    Args:
+        conn: Database connection
+        records: List of records from get_ar_records
+        output_file: Output HTML file path
+        show_cfd: Show confidence values (ar_cfd)
+        compare_embed_ar: If True, group by comparison categories (DISCREPANT/EQUIVOCAL/AGREED)
+                         between AR and Embed results
+        scale_y_axis: Rescale y-axis when toggling controls (default: True)
+        baseline_cycles: Average the first N cycles for each curve before plotting
+    """
+
+    html_content = '''
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>AR (Azure Results) Classification Report</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                margin: 10px;
+                background-color: #f5f5f5;
+            }
+            .container {
+                display: grid;
+                grid-template-columns: repeat(5, 1fr);
+                gap: 8px;
+                max-width: 1400px;
+                margin: 0 auto;
+            }
+            .graph-container {
+                background: white;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                padding: 4px;
+                text-align: center;
+            }
+            .graph-header {
+                font-size: 10px;
+                margin-bottom: 4px;
+                color: #333;
+            }
+            .header {
+                text-align: center;
+                margin: 20px 0;
+            }
+            h1 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 30px 0 20px 0;
+                padding: 20px;
+                background: #2c3e50;
+                color: white;
+                border-radius: 8px;
+                font-size: 1.8em;
+                position: relative;
+                cursor: pointer;
+                user-select: none;
+            }
+            h1:hover {
+                background: #34495e;
+            }
+            h1::after {
+                content: '▼';
+                position: absolute;
+                right: 30px;
+                top: 50%;
+                transform: translateY(-50%);
+                font-size: 0.6em;
+            }
+            h1.collapsed::after {
+                content: '▶';
+            }
+            h1.report-title {
+                cursor: default;
+            }
+            h1.report-title:hover {
+                background: #2c3e50;
+            }
+            h1.report-title::after {
+                content: '';
+            }
+            h2 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 30px 0 15px 0;
+                padding: 15px;
+                background: #34495e;
+                color: white;
+                border-radius: 8px;
+                font-size: 1.4em;
+            }
+            h3 {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 20px 0 10px 0;
+                padding: 12px;
+                background: #7f8c8d;
+                color: white;
+                border-radius: 6px;
+                font-size: 1.2em;
+                position: relative;
+            }
+            h4 {
+                grid-column: 1 / -1;
+                text-align: left;
+                margin: 15px 0 8px 20px;
+                padding: 8px 15px;
+                background: #95a5a6;
+                color: white;
+                border-radius: 4px;
+                font-size: 1.0em;
+            }
+            .toggle-controls-btn {
+                position: absolute;
+                right: 20px;
+                top: 50%;
+                transform: translateY(-50%);
+                background: #ecf0f1;
+                color: #2c3e50;
+                border: none;
+                padding: 6px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 0.8em;
+                font-weight: normal;
+            }
+            .toggle-controls-btn:hover {
+                background: #bdc3c7;
+            }
+            .control-curve.hidden {
+                display: none;
+            }
+            .stats {
+                grid-column: 1 / -1;
+                text-align: center;
+                margin: 10px 0;
+                padding: 10px;
+                background: #ecf0f1;
+                border-radius: 4px;
+                color: #2c3e50;
+            }
+        </style>
+        <script>
+            const Y_PADDING_RATIO = 0.06;
+
+            function parseReadings(polyline) {
+                const data = polyline.dataset.readings;
+                if (!data) {
+                    return [];
+                }
+                return data.split(',')
+                    .map(Number)
+                    .filter(value => Number.isFinite(value));
+            }
+
+            function getPlotConfig(svg) {
+                const width = parseFloat(svg.getAttribute('width')) || 0;
+                const height = parseFloat(svg.getAttribute('height')) || 0;
+                const margin = parseFloat(svg.dataset.margin || 30);
+                return {
+                    margin,
+                    plotWidth: Math.max(width - (2 * margin), 1),
+                    plotHeight: Math.max(height - (2 * margin), 1)
+                };
+            }
+
+            function buildPolylinePoints(readings, config, minValue, maxValue) {
+                if (readings.length < 2) {
+                    return '';
+                }
+
+                const denominator = Math.max(readings.length - 1, 1);
+                const range = maxValue - minValue;
+                const safeRange = range === 0 ? 1 : range;
+
+                return readings.map((reading, index) => {
+                    const x = config.margin + (index * config.plotWidth / denominator);
+                    const normalized = (reading - minValue) / safeRange;
+                    const y = config.margin + config.plotHeight - (config.plotHeight * normalized);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
+            }
+
+            function computeScaleValues(polylines) {
+                let allValues = [];
+                polylines.forEach(polyline => {
+                    allValues = allValues.concat(parseReadings(polyline));
+                });
+
+                if (allValues.length === 0) {
+                    return null;
+                }
+
+                let minValue = Math.min(...allValues);
+                let maxValue = Math.max(...allValues);
+                let range = maxValue - minValue;
+
+                if (range === 0) {
+                    const adjustment = Math.max(Math.abs(maxValue) * 0.05, 1);
+                    minValue -= adjustment;
+                    maxValue += adjustment;
+                    range = maxValue - minValue;
+                }
+
+                const padding = range * Y_PADDING_RATIO;
+                return {
+                    min: minValue - padding,
+                    max: maxValue + padding
+                };
+            }
+
+            function rescaleGraph(svg, includeControls) {
+                if (!svg) {
+                    return;
+                }
+
+                const mainCurves = Array.from(svg.querySelectorAll('.main-curve'));
+                if (mainCurves.length === 0) {
+                    return;
+                }
+
+                const curvesForScale = [...mainCurves];
+                if (includeControls) {
+                    curvesForScale.push(...svg.querySelectorAll('.control-curve'));
+                }
+
+                const scaleValues = computeScaleValues(curvesForScale);
+                if (!scaleValues) {
+                    return;
+                }
+
+                const config = getPlotConfig(svg);
+                const allCurves = svg.querySelectorAll('.main-curve, .control-curve');
+
+                allCurves.forEach(curve => {
+                    const readings = parseReadings(curve);
+                    if (readings.length < 2) {
+                        return;
+                    }
+                    const points = buildPolylinePoints(readings, config, scaleValues.min, scaleValues.max);
+                    if (points) {
+                        curve.setAttribute('points', points);
+                    }
+                });
+
+                const maxLabel = svg.querySelector('.y-axis-max');
+                if (maxLabel) {
+                    maxLabel.textContent = scaleValues.max.toFixed(0);
+                }
+                const minLabel = svg.querySelector('.y-axis-min');
+                if (minLabel) {
+                    minLabel.textContent = scaleValues.min.toFixed(0);
+                }
+            }
+
+            function toggleControls(sectionId, scaleYAxis = true) {
+                const section = document.getElementById(sectionId);
+                if (!section) {
+                    console.error('Section not found:', sectionId);
+                    return;
+                }
+
+                const curves = section.querySelectorAll('.control-curve');
+                const legends = section.querySelectorAll('.graph-legend');
+                const svgs = section.querySelectorAll('svg');
+                const header = section.previousElementSibling;
+                const btn = header ? header.querySelector('.toggle-controls-btn') : null;
+
+                const isHidden = curves.length > 0 && curves[0].classList.contains('hidden');
+
+                curves.forEach(curve => {
+                    if (isHidden) {
+                        curve.classList.remove('hidden');
+                    } else {
+                        curve.classList.add('hidden');
+                    }
+                });
+
+                legends.forEach(legend => {
+                    legend.style.display = isHidden ? 'block' : 'none';
+                });
+
+                const includeControls = isHidden;
+
+                if (scaleYAxis) {
+                    svgs.forEach(svg => {
+                        rescaleGraph(svg, includeControls);
+                    });
+                }
+
+                if (btn) {
+                    btn.textContent = isHidden ? 'Hide Controls' : 'Show Controls';
+                }
+            }
+
+            function toggleCategory(categoryId) {
+                const section = document.getElementById(`section-${categoryId}`);
+                const header = document.getElementById(`header-${categoryId}`);
+
+                if (section.style.display === 'none') {
+                    section.style.display = 'contents';
+                    header.classList.remove('collapsed');
+                } else {
+                    section.style.display = 'none';
+                    header.classList.add('collapsed');
+                }
+            }
+        </script>
+    </head>
+    <body>
+        <script>
+            // Global setting for y-axis scaling
+            const SCALE_Y_AXIS_ON_TOGGLE = {scale_y_axis_flag};
+        </script>
+        <div class="header">
+            <h1 class="report-title">AR (Azure Results) Classification Report</h1>
+            <p style="color: #666;">Original curves from readings + test_data tables, organized by Mix, Target, and AR Classification</p>
+            <p style="color: #999; font-size: 0.9em;\">Control curves: <span style="color:#3498db;">━━ Positive</span> | <span style="color:#95a5a6;">··· Negative</span></p>
+        </div>
+        <div class="container">
+    '''
+
+    # Track current grouping
+    current_comparison_category = None
+    current_mix = None
+    current_mixtarget = None
+    current_ar_cls = None
+    section_counter = 0
+    category_counter = 0
+
+    # Classification labels
+    cls_labels = {
+        0: 'NEGATIVE',
+        1: 'POSITIVE',
+        2: 'AMBIGUOUS'
+    }
+
+    # Comparison category labels
+    comparison_labels = {
+        'DISCREPANT': 'DISCREPANT RESULTS',
+        'EQUIVOCAL': 'EQUIVOCAL RESULTS',
+        'AGREED': 'AGREED RESULTS',
+        'NO_EMBED': 'NO EMBED RESULT'
+    }
+
+    # Count statistics
+    stats = {
+        'total': 0,
+        'by_mix': {},
+        'by_cls': {0: 0, 1: 0, 2: 0},
+        'by_table': {'readings': 0, 'test_data': 0},
+        'by_comparison': {'DISCREPANT': 0, 'EQUIVOCAL': 0, 'AGREED': 0, 'NO_EMBED': 0}
+    }
+
+    # Cache for positive control samples per mix-target
+    pos_control_cache = {}
+
+    print(f"Generating AR classification report for {len(records)} records...")
+
+    for record in tqdm(records, desc="Processing records"):
+        record_id, mix, mixtarget, target, ar_cls, ar_cfd, ar_amb, sample, file, file_uid, tube, embed_cls, embed_ct, source_table = record
+
+        stats['total'] += 1
+        # Calculate effective AR classification (amb overrides cls)
+        ar_cls_calc = 2 if ar_amb == 1 else ar_cls
+        stats['by_cls'][ar_cls_calc] = stats['by_cls'].get(ar_cls_calc, 0) + 1
+        stats['by_mix'][mix] = stats['by_mix'].get(mix, 0) + 1
+        stats['by_table'][source_table] += 1
+
+        # Calculate comparison category if compare_embed_ar mode is enabled
+        comparison_category = None
+        if compare_embed_ar:
+            comparison_category = classify_ar_comparison(ar_amb, ar_cls, embed_cls)
+            stats['by_comparison'][comparison_category] += 1
+
+        if compare_embed_ar:
+            # When compare_embed_ar is enabled: Comparison Category → Mix → MixTarget → AR_cls
+
+            # Add Comparison Category header (h1) when it changes
+            if comparison_category != current_comparison_category:
+                # Close previous category section div if exists
+                if current_comparison_category is not None:
+                    html_content += '</div>\n'  # Close previous category-section
+
+                # Skip NO_EMBED if empty
+                if comparison_category == 'NO_EMBED':
+                    current_comparison_category = comparison_category
+                    continue
+
+                category_counter += 1
+                comp_label = comparison_labels.get(comparison_category, comparison_category)
+
+                # Hide AGREED and beyond by default
+                if category_counter >= 3:
+                    section_style = 'display: none;'
+                    header_class = ' collapsed'
+                else:
+                    section_style = 'display: contents;'
+                    header_class = ''
+
+                html_content += f'''
+            <h1 id="header-cat{category_counter}" class="{header_class}" onclick="toggleCategory('cat{category_counter}')">{comp_label}</h1>
+            <div id="section-cat{category_counter}" style="{section_style}">
+            '''
+                current_comparison_category = comparison_category
+                current_mix = None
+                current_mixtarget = None
+                current_ar_cls = None
+
+            # Add Mix header (h2) when it changes
+            if mix != current_mix:
+                html_content += f'''
+            <h2>Mix: {mix}</h2>
+            '''
+                current_mix = mix
+                current_mixtarget = None
+                current_ar_cls = None
+
+            # Add MixTarget header (h3) when it changes
+            if mixtarget != current_mixtarget:
+                # Close previous section div if exists
+                if current_ar_cls is not None:
+                    html_content += '</div>\n'
+                    current_ar_cls = None
+
+                section_counter += 1
+                section_id = f'section_{section_counter}'
+                html_content += f'''
+            <h3>
+                Target: {mixtarget}
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+            </h3>
+            <div id="{section_id}" style="display: contents;">
+            '''
+                current_mixtarget = mixtarget
+                current_ar_cls = None
+
+            # Add AR_cls sub-header (h4) when it changes
+            if ar_cls_calc != current_ar_cls:
+                cls_label = cls_labels.get(ar_cls_calc, f'Class {ar_cls_calc}')
+                html_content += f'''
+                <h4 style="grid-column: 1 / -1; text-align: left; margin: 15px 0 8px 20px; padding: 8px 15px; background: #95a5a6; color: white; border-radius: 4px; font-size: 1.0em;">
+                    {cls_label}
+                </h4>
+                '''
+                current_ar_cls = ar_cls_calc
+        else:
+            # Original behavior: Mix → MixTarget → AR_cls
+
+            # Add Mix header (h1) when it changes
+            if mix != current_mix:
+                html_content += f'''
+            <h1>Mix: {mix}</h1>
+            '''
+                current_mix = mix
+                current_mixtarget = None
+                current_ar_cls = None
+
+            # Add MixTarget header (h2) when it changes
+            if mixtarget != current_mixtarget:
+                html_content += f'''
+            <h2>Target: {mixtarget}</h2>
+            '''
+                current_mixtarget = mixtarget
+                current_ar_cls = None
+
+            # Add AR_cls header (h3) when it changes
+            if ar_cls_calc != current_ar_cls:
+                # Close previous section div if exists
+                if current_ar_cls is not None:
+                    html_content += '</div>\n'
+
+                section_counter += 1
+                section_id = f'section_{section_counter}'
+                cls_label = cls_labels.get(ar_cls_calc, f'Class {ar_cls_calc}')
+                html_content += f'''
+            <h3>
+                {cls_label}
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
+            </h3>
+            <div id="{section_id}" style="display: contents;">
+            '''
+                current_ar_cls = ar_cls_calc
+
+        # Get readings and generate graph
+        try:
+            readings = get_readings_for_id(conn, record_id, source_table)
+            if readings:
+                # Get control curves for this sample
+                cache_key = f"{mix}_{mixtarget}"
+                if cache_key not in pos_control_cache:
+                    pos_control_cache[cache_key] = get_positive_control_samples(conn, mix, mixtarget)
+
+                pos_control_samples = pos_control_cache[cache_key]
+
+                # Fetch positive controls
+                pos_controls = []
+                if pos_control_samples and file_uid:
+                    pos_control_records = get_control_curves(conn, file_uid, mix, mixtarget, pos_control_samples, is_positive=True)
+                    pos_controls = [(sample_name, readings) for _, sample_name, readings, _ in pos_control_records]
+
+                # Fetch negative controls
+                neg_controls = []
+                if file_uid:
+                    neg_control_records = get_control_curves(conn, file_uid, mix, mixtarget, None, is_positive=False)
+                    neg_controls = [(sample_name, readings) for _, sample_name, readings, _ in neg_control_records]
+
+                # Determine color based on AR classification (amb overrides cls)
+                ar_color_cls = 2 if ar_amb == 1 else ar_cls
+
+                metadata = {
+                    'AzureCls': ar_color_cls,  # Use for coloring
+                    'AzureCFD': ar_cfd,  # AR CFD for display
+                    'Sample': sample,
+                    'File': file,
+                    'Tube': tube,
+                    'EmbedCls': embed_cls,
+                    'EmbedCt': embed_ct
+                }
+                svg_graph = generate_svg_graph(
+                    record_id,
+                    readings,
+                    metadata,
+                    show_cfd=show_cfd,
+                    pos_controls=pos_controls if pos_controls else None,
+                    neg_controls=neg_controls if neg_controls else None,
+                    baseline_cycles=baseline_cycles,
+                    show_machine_result=compare_embed_ar
+                )
+                html_content += svg_graph
+        except Exception as e:
+            print(f"Error processing record {record_id} from {source_table}: {e}")
+            continue
+
+    # Close last section div
+    if current_ar_cls is not None:
+        html_content += '</div>\n'  # Close target section
+
+    # Close last category section div
+    if compare_embed_ar and current_comparison_category is not None:
+        html_content += '</div>\n'  # Close category-section
+
+    # Build statistics HTML
+    stats_comparison_html = ''
+    if compare_embed_ar:
+        stats_comparison_html = f'''
+            <p><strong>By Comparison:</strong>
+               Discrepant: {stats['by_comparison']['DISCREPANT']} |
+               Equivocal: {stats['by_comparison']['EQUIVOCAL']} |
+               Agreed: {stats['by_comparison']['AGREED']}'''
+        if stats['by_comparison']['NO_EMBED'] > 0:
+            stats_comparison_html += f''' |
+               No Embed: {stats['by_comparison']['NO_EMBED']}'''
+        stats_comparison_html += '\n            </p>'
+
+    # Close HTML
+    html_content += f'''
+        </div>
+        <div class="stats">
+            <h3>Report Statistics</h3>
+            <p><strong>Total Records:</strong> {stats['total']}</p>
+            <p><strong>By Source Table:</strong>
+               readings: {stats['by_table']['readings']} |
+               test_data: {stats['by_table']['test_data']}
+            </p>
+            <p><strong>By AR Classification:</strong>
+               Positive: {stats['by_cls'].get(1, 0)} |
+               Negative: {stats['by_cls'].get(0, 0)} |
+               Ambiguous: {stats['by_cls'].get(2, 0)}
+            </p>
+            {stats_comparison_html}
+            <p><strong>By Mix:</strong> {' | '.join([f'{k}: {v}' for k, v in sorted(stats['by_mix'].items())])}</p>
+        </div>
+    </body>
+    </html>
+    '''
+
+    # Replace flag placeholder with actual value
+    scale_y_axis_str = 'true' if scale_y_axis else 'false'
+    html_content = html_content.replace('{scale_y_axis_flag}', scale_y_axis_str)
+
+    # Write file
+    with open(output_file, 'w') as f:
+        f.write(html_content)
+
+    print(f"\nHTML report generated: {output_file}")
+    print(f"Total records: {stats['total']}")
+    print(f"  readings: {stats['by_table']['readings']}, test_data: {stats['by_table']['test_data']}")
+    print(f"Positive: {stats['by_cls'].get(1, 0)}, Negative: {stats['by_cls'].get(0, 0)}, Ambiguous: {stats['by_cls'].get(2, 0)}")
+    if compare_embed_ar:
+        print(f"Comparison: Discrepant: {stats['by_comparison']['DISCREPANT']}, Equivocal: {stats['by_comparison']['EQUIVOCAL']}, Agreed: {stats['by_comparison']['AGREED']}, No Embed: {stats['by_comparison']['NO_EMBED']}")
+
+
 def generate_html_report(conn, records, output_file, show_cfd=False, compare_embed=False,
                          scale_y_axis=True, baseline_cycles=0):
     """
@@ -1900,6 +2651,8 @@ def main():
                        help='Include IC (internal control) targets in the report (default: excluded)')
     parser.add_argument('--compare-embed', action='store_true',
                        help='Group results by comparison between Azure and embedded machine classifications (DISCREPANT/EQUIVOCAL/AGREED)')
+    parser.add_argument('--compare-embed-ar', action='store_true',
+                       help='Group results by comparison between AR (Azure Results) and embedded machine classifications (DISCREPANT/EQUIVOCAL/AGREED)')
     parser.add_argument('--sample-details', nargs='+', type=int,
                        help='Generate sample details report for specific sample IDs (includes IC targets unless --no-ic is used)')
     parser.add_argument('--no-ic', action='store_true',
@@ -1952,29 +2705,56 @@ def main():
             baseline_cycles=args.baseline
         )
     else:
-        # Standard comparison mode
+        # Standard comparison mode (Azure or AR)
         filter_msg = "" if args.include_ic else " (excluding IC targets)"
-        print(f"Reading Azure classification records from both readings and test_data tables{filter_msg}...")
-        records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed)
 
-        if not records:
-            print(f"No records with Azure classification found in database")
-            conn.close()
-            sys.exit(1)
+        # Determine which mode to use
+        use_ar = args.compare_embed_ar
 
-        print(f"Found {len(records)} records with Azure classification")
+        if use_ar:
+            print(f"Reading AR (Azure Results) classification records from both readings and test_data tables{filter_msg}...")
+            records = get_ar_records(conn, include_ic=args.include_ic, compare_embed_ar=args.compare_embed_ar)
 
-        # Generate HTML report
-        scale_y_axis = not args.dont_scale_y
-        generate_html_report(
-            conn,
-            records,
-            args.output,
-            show_cfd=args.show_cfd,
-            compare_embed=args.compare_embed,
-            scale_y_axis=scale_y_axis,
-            baseline_cycles=args.baseline
-        )
+            if not records:
+                print(f"No records with AR classification found in database")
+                conn.close()
+                sys.exit(1)
+
+            print(f"Found {len(records)} records with AR classification")
+
+            # Generate HTML report with AR mode
+            scale_y_axis = not args.dont_scale_y
+            generate_html_report_ar(
+                conn,
+                records,
+                args.output,
+                show_cfd=args.show_cfd,
+                compare_embed_ar=args.compare_embed_ar,
+                scale_y_axis=scale_y_axis,
+                baseline_cycles=args.baseline
+            )
+        else:
+            print(f"Reading Azure classification records from both readings and test_data tables{filter_msg}...")
+            records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed)
+
+            if not records:
+                print(f"No records with Azure classification found in database")
+                conn.close()
+                sys.exit(1)
+
+            print(f"Found {len(records)} records with Azure classification")
+
+            # Generate HTML report
+            scale_y_axis = not args.dont_scale_y
+            generate_html_report(
+                conn,
+                records,
+                args.output,
+                show_cfd=args.show_cfd,
+                compare_embed=args.compare_embed,
+                scale_y_axis=scale_y_axis,
+                baseline_cycles=args.baseline
+            )
 
     conn.close()
     return 0
