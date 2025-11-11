@@ -271,7 +271,7 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180):
     return svg, metadata
 
 
-def generate_comparison_report(conn, output_file, compare_count=None, include_ic=True, show_classification_changes=False, exclude_change_type=None):
+def generate_comparison_report(conn, output_file, compare_count=None, include_ic=True, show_classification_changes=False, exclude_change_type=None, sort_by='azure_cfd', mixes=None):
     """
     Generate comparison report of Azure vs AR results.
 
@@ -282,18 +282,31 @@ def generate_comparison_report(conn, output_file, compare_count=None, include_ic
         include_ic: Include IC targets (default: False, exclude IC)
         show_classification_changes: Show classification changes instead of ranking disagreements
         exclude_change_type: List of change types to exclude (e.g., ['pos->neg'])
+        sort_by: Sort records within groups by 'azure_cfd' or 'ar_cfd' (default: 'azure_cfd')
+        mixes: Set of mix names to include (default: None = all mixes)
     """
 
-    # Get mix-target combinations (exclude IC if specified)
+    # Get mix-target combinations (exclude IC if specified, filter by mixes if specified)
     cursor = conn.cursor()
     ic_filter = "" if include_ic else "AND MixTarget != 'IC'"
+
+    # Build mixes filter
+    if mixes:
+        placeholders = ','.join('?' * len(mixes))
+        mix_filter = f"AND Mix IN ({placeholders})"
+        query_params = list(mixes)
+    else:
+        mix_filter = ""
+        query_params = []
+
     cursor.execute(f"""
         SELECT DISTINCT Mix, MixTarget
         FROM all_readings
         WHERE AzureCFD IS NOT NULL AND ar_cfd IS NOT NULL
               {ic_filter}
+              {mix_filter}
         ORDER BY Mix, MixTarget
-    """)
+    """, query_params)
 
     combinations = cursor.fetchall()
 
@@ -466,6 +479,15 @@ def generate_comparison_report(conn, output_file, compare_count=None, include_ic
             # Display each change type as a section
             for change_type in sorted(changes_dict.keys()):
                 change_records = changes_dict[change_type]
+
+                # Sort records within this change type group based on sort_by parameter
+                if sort_by == 'ar_cfd':
+                    # ar_cfd is at index 7 in the record tuple
+                    change_records = sorted(change_records, key=lambda x: x[7], reverse=True)
+                else:  # default: azure_cfd
+                    # azure_cfd is at index 4 in the record tuple
+                    change_records = sorted(change_records, key=lambda x: x[4], reverse=True)
+
                 html_content += f'<h3>Classification Change: {change_type.upper()}</h3>'
                 html_content += f'''
                 <div class="stats">
@@ -588,6 +610,10 @@ def main():
     parser.add_argument('--exclude-change-type', nargs='+',
                        choices=['pos->neg', 'neg->pos', 'pos->amb', 'neg->amb', 'amb->pos', 'amb->neg'],
                        help='Exclude specific change types (e.g., pos->neg neg->pos)')
+    parser.add_argument('--sort-by', choices=['azure_cfd', 'ar_cfd'], default='azure_cfd',
+                       help='Sort records within groups by: azure_cfd (Azure CFD), ar_cfd (AR CFD) (default: azure_cfd)')
+    parser.add_argument('--mixes',
+                       help='Comma-separated list of mix names to include (default: all mixes)')
 
     args = parser.parse_args()
 
@@ -604,6 +630,13 @@ def main():
     include_ic = not args.no_ic
     exclude_changes = set(args.exclude_change_type) if args.exclude_change_type else None
 
+    # Parse mixes filter
+    mixes = None
+    if args.mixes:
+        # Split by comma, strip whitespace, convert to uppercase
+        mixes = {mix.strip().upper() for mix in args.mixes.split(',')}
+        print(f"Filtering to mixes: {', '.join(sorted(mixes))}")
+
     # Generate report
     generate_comparison_report(
         conn,
@@ -611,7 +644,9 @@ def main():
         compare_count=args.compare_az_ar,
         include_ic=include_ic,
         show_classification_changes=args.show_classification_changes,
-        exclude_change_type=exclude_changes
+        exclude_change_type=exclude_changes,
+        sort_by=args.sort_by,
+        mixes=mixes
     )
 
     conn.close()

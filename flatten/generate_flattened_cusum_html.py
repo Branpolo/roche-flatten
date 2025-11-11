@@ -73,7 +73,7 @@ def get_readings_for_id(conn, target_id):
     cursor = conn.cursor()
     readings_columns = [f"readings{i}" for i in range(44)]
     readings_select = ", ".join(readings_columns)
-    cursor.execute(f"SELECT {readings_select} FROM readings WHERE id = ?", (target_id,))
+    cursor.execute(f"SELECT {readings_select} FROM all_readings WHERE id = ?", (target_id,))
     row = cursor.fetchone()
     if not row:
         return []
@@ -364,113 +364,151 @@ def generate_svg_graph_with_flattening(record_id, readings, cusum_values, cusum_
     
     return svg
 
-def get_example_ids(conn, sort_order='down'):
+def get_example_ids(conn, sort_order='down', mixes=None):
     """Get example IDs from database"""
     cursor = conn.cursor()
-    
+
     # First check if example_ids table exists
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='example_ids'")
     if not cursor.fetchone():
         print("Creating example_ids table...")
         cursor.execute("CREATE TABLE example_ids (id INTEGER PRIMARY KEY)")
-        
+
         # Insert the example IDs from feedback plots + 2112 (key test case)
-        example_ids = [3, 8, 9, 10, 20, 30, 33, 38, 49, 59, 60, 199, 203, 206, 367, 386, 
-                      427, 434, 479, 486, 600, 601, 820, 1256, 1264, 1276, 1339, 1340, 
+        example_ids = [3, 8, 9, 10, 20, 30, 33, 38, 49, 59, 60, 199, 203, 206, 367, 386,
+                      427, 434, 479, 486, 600, 601, 820, 1256, 1264, 1276, 1339, 1340,
                       1782, 1825, 1862, 1877, 2112, 2300, 2304]
-        
+
         for example_id in example_ids:
             cursor.execute("INSERT INTO example_ids (id) VALUES (?)", (example_id,))
-        
+
         conn.commit()
         print(f"Populated example_ids table with {len(example_ids)} IDs")
-    
+
+    # Build WHERE clause with mixes filter
+    where_clauses = ["r.in_use = 1", "r.cusum_min_correct IS NOT NULL"]
+    query_params = []
+
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"r.Mix IN ({placeholders})")
+        query_params.extend(mixes)
+
+    where_clause = " AND ".join(where_clauses)
+
     # Get example IDs that exist in the readings table
     if sort_order == 'none':
         # No sorting - just return in whatever order
-        cursor.execute("""
+        query = f"""
         SELECT e.id, r.cusum_min_correct
         FROM example_ids e
-        JOIN readings r ON e.id = r.id
-        WHERE r.in_use = 1 AND r.cusum_min_correct IS NOT NULL
-        """)
+        JOIN all_readings r ON e.id = r.id
+        WHERE {where_clause}
+        """
+        cursor.execute(query, query_params)
     else:
         # Sort by database CUSUM values
         order_sql = "DESC" if sort_order == 'down' else "ASC"
-        cursor.execute(f"""
+        query = f"""
         SELECT e.id, r.cusum_min_correct
         FROM example_ids e
-        JOIN readings r ON e.id = r.id
-        WHERE r.in_use = 1 AND r.cusum_min_correct IS NOT NULL
+        JOIN all_readings r ON e.id = r.id
+        WHERE {where_clause}
         ORDER BY r.cusum_min_correct {order_sql}
-        """)
-    
+        """
+        cursor.execute(query, query_params)
+
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_example_ids_by_sort(conn, sort_by, sort_order='down'):
+def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None):
     """Get example IDs with flexible sorting options"""
     cursor = conn.cursor()
-    
+
     # First check if example_ids table exists
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='example_ids'")
     if not cursor.fetchone():
         print("Creating example_ids table...")
         cursor.execute("CREATE TABLE example_ids (id INTEGER PRIMARY KEY)")
-        
+
         # Insert the example IDs from feedback plots + 2112 (key test case)
-        example_ids = [3, 8, 9, 10, 20, 30, 33, 38, 49, 59, 60, 199, 203, 206, 367, 386, 
-                      427, 434, 479, 486, 600, 601, 820, 1256, 1264, 1276, 1339, 1340, 
+        example_ids = [3, 8, 9, 10, 20, 30, 33, 38, 49, 59, 60, 199, 203, 206, 367, 386,
+                      427, 434, 479, 486, 600, 601, 820, 1256, 1264, 1276, 1339, 1340,
                       1782, 1825, 1862, 1877, 2112, 2300, 2304]
-        
+
         for example_id in example_ids:
             cursor.execute("INSERT INTO example_ids (id) VALUES (?)", (example_id,))
-        
+
         conn.commit()
         print(f"Populated example_ids table with {len(example_ids)} IDs")
-    
+
+    # Build WHERE clause with mixes filter
+    where_clauses = ["r.in_use = 1", "r.cusum_min_correct IS NOT NULL"]
+    query_params = []
+
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"r.Mix IN ({placeholders})")
+        query_params.extend(mixes)
+
+    where_clause = " AND ".join(where_clauses)
+
     # Determine sort column and order
     if sort_by == 'id':
         sort_col = "e.id"
     else:  # db-cusum or none
         sort_col = "r.cusum_min_correct"
-    
+
     order_sql = "DESC" if sort_order == 'down' else "ASC"
-    
-    cursor.execute(f"""
+
+    query = f"""
     SELECT e.id, r.cusum_min_correct
     FROM example_ids e
-    JOIN readings r ON e.id = r.id
-    WHERE r.in_use = 1 AND r.cusum_min_correct IS NOT NULL
+    JOIN all_readings r ON e.id = r.id
+    WHERE {where_clause}
     ORDER BY {sort_col} {order_sql}
-    """)
-    
+    """
+    cursor.execute(query, query_params)
+
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_all_records(conn, sort_order='down'):
+def get_all_records(conn, sort_order='down', mixes=None):
     """Get all records with specified sort order"""
     cursor = conn.cursor()
-    
+
+    # Build WHERE clause with mixes filter
+    where_clauses = ["in_use = 1", "cusum_min_correct IS NOT NULL"]
+    query_params = []
+
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"Mix IN ({placeholders})")
+        query_params.extend(mixes)
+
+    where_clause = " AND ".join(where_clauses)
+
     if sort_order == 'none':
-        cursor.execute("""
+        query = f"""
         SELECT id, cusum_min_correct
-        FROM readings 
-        WHERE in_use = 1 AND cusum_min_correct IS NOT NULL
-        """)
+        FROM all_readings
+        WHERE {where_clause}
+        """
+        cursor.execute(query, query_params)
     else:
         order_sql = "DESC" if sort_order == 'down' else "ASC"
-        cursor.execute(f"""
+        query = f"""
         SELECT id, cusum_min_correct
-        FROM readings 
-        WHERE in_use = 1 AND cusum_min_correct IS NOT NULL
+        FROM all_readings
+        WHERE {where_clause}
         ORDER BY cusum_min_correct {order_sql}
-        """)
-    
+        """
+        cursor.execute(query, query_params)
+
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_all_records_by_sort(conn, sort_by, sort_order='down', group_by=None, azurecls_only=False, secondary_group_by_azurecls=False):
+def get_all_records_by_sort(conn, sort_by, sort_order='down', group_by=None, azurecls_only=False, secondary_group_by_azurecls=False, mixes=None):
     """Get all records with flexible sorting options"""
     cursor = conn.cursor()
 
@@ -489,10 +527,18 @@ def get_all_records_by_sort(conn, sort_by, sort_order='down', group_by=None, azu
     if secondary_group_by_azurecls:
         select_cols += ", AzureCls"
 
-    # Build WHERE clause
+    # Build WHERE clause with mixes filter
     where_clauses = ["in_use = 1", "cusum_min_correct IS NOT NULL"]
+    query_params = []
+
     if azurecls_only:
         where_clauses.append("AzureCls IS NOT NULL")
+
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"Mix IN ({placeholders})")
+        query_params.extend(mixes)
+
     where_clause = " AND ".join(where_clauses)
 
     # Build ORDER BY clause
@@ -504,12 +550,13 @@ def get_all_records_by_sort(conn, sort_by, sort_order='down', group_by=None, azu
     else:
         order_clause = f"{sort_col} {order_sql}"
 
-    cursor.execute(f"""
+    query = f"""
     SELECT {select_cols}
-    FROM readings
+    FROM all_readings
     WHERE {where_clause}
     ORDER BY {order_clause}
-    """)
+    """
+    cursor.execute(query, query_params)
 
     # Convert bytes to float for cusum_min_correct
     if group_by and secondary_group_by_azurecls:
@@ -519,49 +566,74 @@ def get_all_records_by_sort(conn, sort_by, sort_order='down', group_by=None, azu
     else:
         return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_custom_records(conn, id_list, sort_order='down'):
+def get_custom_records(conn, id_list, sort_order='down', mixes=None):
     """Get custom records with specified sort order"""
     cursor = conn.cursor()
     placeholders = ','.join(['?'] * len(id_list))
-    
+
+    # Build WHERE clause with mixes filter
+    where_clauses = [f"id IN ({placeholders})", "in_use = 1", "cusum_min_correct IS NOT NULL"]
+    query_params = list(id_list)
+
+    if mixes:
+        mix_placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"Mix IN ({mix_placeholders})")
+        query_params.extend(mixes)
+
+    where_clause = " AND ".join(where_clauses)
+
     if sort_order == 'none':
-        cursor.execute(f"""
+        query = f"""
         SELECT id, cusum_min_correct
-        FROM readings 
-        WHERE id IN ({placeholders}) AND in_use = 1 AND cusum_min_correct IS NOT NULL
-        """, id_list)
+        FROM all_readings
+        WHERE {where_clause}
+        """
+        cursor.execute(query, query_params)
     else:
         order_sql = "DESC" if sort_order == 'down' else "ASC"
-        cursor.execute(f"""
+        query = f"""
         SELECT id, cusum_min_correct
-        FROM readings 
-        WHERE id IN ({placeholders}) AND in_use = 1 AND cusum_min_correct IS NOT NULL
+        FROM all_readings
+        WHERE {where_clause}
         ORDER BY cusum_min_correct {order_sql}
-        """, id_list)
-    
+        """
+        cursor.execute(query, query_params)
+
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_custom_records_by_sort(conn, id_list, sort_by, sort_order='down'):
+def get_custom_records_by_sort(conn, id_list, sort_by, sort_order='down', mixes=None):
     """Get custom records with flexible sorting options"""
     cursor = conn.cursor()
     placeholders = ','.join(['?'] * len(id_list))
-    
+
+    # Build WHERE clause with mixes filter
+    where_clauses = [f"id IN ({placeholders})", "in_use = 1", "cusum_min_correct IS NOT NULL"]
+    query_params = list(id_list)
+
+    if mixes:
+        mix_placeholders = ','.join(['?'] * len(mixes))
+        where_clauses.append(f"Mix IN ({mix_placeholders})")
+        query_params.extend(mixes)
+
+    where_clause = " AND ".join(where_clauses)
+
     # Determine sort column and order
     if sort_by == 'id':
         sort_col = "id"
     else:  # db-cusum
         sort_col = "cusum_min_correct"
-    
+
     order_sql = "DESC" if sort_order == 'down' else "ASC"
-    
-    cursor.execute(f"""
+
+    query = f"""
     SELECT id, cusum_min_correct
-    FROM readings 
-    WHERE id IN ({placeholders}) AND in_use = 1 AND cusum_min_correct IS NOT NULL
+    FROM all_readings
+    WHERE {where_clause}
     ORDER BY {sort_col} {order_sql}
-    """, id_list)
-    
+    """
+    cursor.execute(query, query_params)
+
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
@@ -601,16 +673,23 @@ def main():
                        help='Group records by specified column (e.g., MixTarget_Full for mix target grouping)')
     parser.add_argument('--azurecls-only', action='store_true',
                        help='Only include records with non-null AzureCls values')
+    parser.add_argument('--mixes', type=str,
+                       help='Comma-separated list of mix names to include (default: all mixes)')
 
     args = parser.parse_args()
-    
+
     # Handle aliases
     if args.default_k != 0.0 and args.k == 0.0:
         args.k = args.default_k
-    
+
     # Use cusum-limit if specified (alias for threshold)
     if args.cusum_limit != -80 and args.threshold == -80:
         args.threshold = args.cusum_limit
+
+    # Parse mixes list (convert to uppercase for case-insensitive matching)
+    mixes_list = None
+    if args.mixes:
+        mixes_list = [m.strip().upper() for m in args.mixes.split(',')]
     
     # Create output directory if it doesn't exist
     if not os.path.exists(args.output):
@@ -634,16 +713,16 @@ def main():
         # For k!=0.0 with CUSUM sorting, get records without sorting, calculate new CUSUM, then sort
         if args.example_dataset:
             print("Using example dataset from feedback plots...")
-            records = get_example_ids(conn, 'none')  # No sorting initially
+            records = get_example_ids(conn, 'none', mixes_list)  # No sorting initially
             file_type = "Example Dataset"
         elif args.ids:
             print(f"Processing specific IDs: {args.ids}")
             id_list = [int(x.strip()) for x in args.ids.split(',')]
-            records = get_custom_records(conn, id_list, 'none')  # No sorting initially
+            records = get_custom_records(conn, id_list, 'none', mixes_list)  # No sorting initially
             file_type = "Custom IDs"
         else:
             print("Processing all records...")
-            records = get_all_records(conn, 'none')  # No sorting initially
+            records = get_all_records(conn, 'none', mixes_list)  # No sorting initially
             file_type = "All Records"
         
         # Calculate new CUSUM values and sort accordingly
@@ -667,19 +746,19 @@ def main():
         # For k=0.0 with CUSUM sorting, or any k with db-cusum/id sorting (fast database sorting)
         if args.example_dataset:
             print("Using example dataset from feedback plots...")
-            records = get_example_ids_by_sort(conn, args.sort_by, args.sort_order)
+            records = get_example_ids_by_sort(conn, args.sort_by, args.sort_order, mixes_list)
             file_type = "Example Dataset"
         elif args.ids:
             print(f"Processing specific IDs: {args.ids}")
             id_list = [int(x.strip()) for x in args.ids.split(',')]
-            records = get_custom_records_by_sort(conn, id_list, args.sort_by, args.sort_order)
+            records = get_custom_records_by_sort(conn, id_list, args.sort_by, args.sort_order, mixes_list)
             file_type = "Custom IDs"
         else:
             print("Processing all records...")
             # Enable secondary grouping by AzureCls when using azurecls-only
             secondary_group = args.azurecls_only and args.group_by
             records = get_all_records_by_sort(conn, args.sort_by, args.sort_order, args.group_by,
-                                             args.azurecls_only, secondary_group)
+                                             args.azurecls_only, secondary_group, mixes_list)
             file_type = "All Records"
     
     # Apply limit if specified
@@ -687,7 +766,8 @@ def main():
         records = records[:args.limit]
         print(f"Limited to {args.limit} records")
     
-    print(f"Processing {len(records)} records with k={args.k}, threshold={args.threshold}, sort-by={args.sort_by}, sort-order={args.sort_order}, sanity-check={args.sanity_check_slope}, sanity-lob={args.sanity_lob}, only-failed={args.only_failed}, azurecls-only={args.azurecls_only}")
+    mixes_desc = f", mixes={','.join(mixes_list)}" if mixes_list else ""
+    print(f"Processing {len(records)} records with k={args.k}, threshold={args.threshold}, sort-by={args.sort_by}, sort-order={args.sort_order}, sanity-check={args.sanity_check_slope}, sanity-lob={args.sanity_lob}, only-failed={args.only_failed}, azurecls-only={args.azurecls_only}{mixes_desc}")
 
     # Generate HTML file with custom parameters
     secondary_group = args.azurecls_only and args.group_by
@@ -821,7 +901,7 @@ def generate_html_file(conn, records, output_file, file_type, k_param=0.0, thres
                 cusum_columns = [f"cusum{j}" for j in range(len(readings))]
                 cusum_select = ", ".join(cusum_columns)
                 cursor = conn.cursor()
-                cursor.execute(f"SELECT {cusum_select} FROM readings WHERE id = ?", (record_id,))
+                cursor.execute(f"SELECT {cusum_select} FROM all_readings WHERE id = ?", (record_id,))
                 cusum_row = cursor.fetchone()
                 # Handle both float and bytes data types
                 cusum_values = []

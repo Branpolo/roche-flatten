@@ -39,7 +39,7 @@ def apply_baseline(readings, baseline_cycles):
     return [value / baseline_value for value in readings]
 
 
-def get_readings_for_id(conn, record_id, table='readings'):
+def get_readings_for_id(conn, record_id, table='all_readings'):
     """Get readings for a specific ID"""
     cursor = conn.cursor()
     readings_columns = [f"readings{i}" for i in range(44)]
@@ -95,47 +95,47 @@ def get_control_curves(conn, file_uid, mix, mixtarget, control_samples, is_posit
 
     controls = []
 
-    # Query both tables
-    for table in ['readings', 'test_data']:
-        if is_positive and control_samples:
-            # Positive controls: match specific sample names (case-insensitive)
-            # Build UPPER comparison for each control sample
-            conditions = ' OR '.join([f'UPPER(Sample) = UPPER(?)' for _ in control_samples])
-            query = f"""
-                SELECT id, Sample, {readings_select}
-                FROM {table}
-                WHERE FileUID = ?
-                  AND Mix = ?
-                  AND UPPER(MixTarget) = UPPER(?)
-                  AND ({conditions})
-                  AND in_use = 1
-            """
-            params = [file_uid, mix, mixtarget] + control_samples
-        else:
-            # Negative controls: pattern matching (case-insensitive)
-            query = f"""
-                SELECT id, Sample, {readings_select}
-                FROM {table}
-                WHERE FileUID = ?
-                  AND Mix = ?
-                  AND UPPER(MixTarget) = UPPER(?)
-                  AND (UPPER(Sample) LIKE 'NPC%' OR UPPER(Sample) LIKE 'NTC%' OR UPPER(Sample) LIKE 'NEG%')
-                  AND in_use = 1
-            """
-            params = [file_uid, mix, mixtarget]
+    # Query all_readings table
+    table = 'all_readings'
+    if is_positive and control_samples:
+        # Positive controls: match specific sample names (case-insensitive)
+        # Build UPPER comparison for each control sample
+        conditions = ' OR '.join([f'UPPER(Sample) = UPPER(?)' for _ in control_samples])
+        query = f"""
+            SELECT id, Sample, {readings_select}
+            FROM {table}
+            WHERE FileUID = ?
+              AND Mix = ?
+              AND UPPER(MixTarget) = UPPER(?)
+              AND ({conditions})
+              AND in_use = 1
+        """
+        params = [file_uid, mix, mixtarget] + control_samples
+    else:
+        # Negative controls: pattern matching (case-insensitive)
+        query = f"""
+            SELECT id, Sample, {readings_select}
+            FROM {table}
+            WHERE FileUID = ?
+              AND Mix = ?
+              AND UPPER(MixTarget) = UPPER(?)
+              AND (UPPER(Sample) LIKE 'NPC%' OR UPPER(Sample) LIKE 'NTC%' OR UPPER(Sample) LIKE 'NEG%')
+              AND in_use = 1
+        """
+        params = [file_uid, mix, mixtarget]
 
-        cursor.execute(query, params)
-        for row in cursor.fetchall():
-            record_id = row[0]
-            sample = row[1]
-            readings = [r for r in row[2:] if r is not None]
-            if readings:  # Only include if we have actual data
-                controls.append((record_id, sample, readings, table))
+    cursor.execute(query, params)
+    for row in cursor.fetchall():
+        record_id = row[0]
+        sample = row[1]
+        readings = [r for r in row[2:] if r is not None]
+        if readings:  # Only include if we have actual data
+            controls.append((record_id, sample, readings, table))
 
     return controls
 
 
-def get_sample_detail_records(conn, sample_ids, include_ic=True):
+def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None):
     """
     Get all records for specified samples with Azure and Embed results.
 
@@ -146,6 +146,7 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True):
         conn: Database connection
         sample_ids: List of sample IDs to retrieve
         include_ic: Include IC targets when True (default), otherwise drop IC entries
+        mixes: Optional list of mix names to filter (case-insensitive, uppercased)
 
     Returns:
         List of tuples: (id, Sample, File, Mix, MixTarget, Target, AzureCls, AzureCFD,
@@ -161,9 +162,14 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True):
     if not include_ic:
         ic_filter = "AND UPPER(Target) != 'IC' AND UPPER(MixTarget) != 'IC'"
 
-    # Query both tables with all targets (including IC by default), skip E1/E2
-    cursor.execute(f"""
-    SELECT * FROM (
+    # Build WHERE clause for mixes filtering
+    mixes_filter = ""
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        mixes_filter = f"AND Mix IN ({placeholders})"
+
+    # Query all_readings table with all targets (including IC by default), skip E1/E2
+    query = f"""
         SELECT
             id,
             Sample,
@@ -175,47 +181,33 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True):
             AzureCFD,
             EmbedCls,
             EmbedCt,
-            'readings' as source_table
-        FROM readings
+            'all_readings' as source_table
+        FROM all_readings
         WHERE Sample IN ({sample_list})
           AND in_use = 1
           AND MixTarget NOT IN ('E1', 'E2')
           {ic_filter}
-
-        UNION ALL
-
-        SELECT
-            id,
+          {mixes_filter}
+        ORDER BY
             Sample,
             File,
             Mix,
             MixTarget,
-            Target,
-            AzureCls,
-            AzureCFD,
-            EmbedCls,
-            EmbedCt,
-            'test_data' as source_table
-        FROM test_data
-        WHERE Sample IN ({sample_list})
-          AND in_use = 1
-          AND MixTarget NOT IN ('E1', 'E2')
-          {ic_filter}
-    )
-    ORDER BY
-        Sample,
-        File,
-        Mix,
-        MixTarget,
-        Target
-    """)
+            Target
+    """
+
+    # Execute with mixes parameters if provided
+    if mixes:
+        cursor.execute(query, tuple(mixes))
+    else:
+        cursor.execute(query)
 
     return cursor.fetchall()
 
 
 def fetch_mix_target_records(conn, mix, mixtarget):
     """
-    Fetch all records for a mix/mixtarget pair (both readings and test_data) with AzureCFD values.
+    Fetch all records for a mix/mixtarget pair from all_readings table with AzureCFD values.
 
     Returns records sorted by AzureCFD descending to simplify nearest-neighbour lookups.
     """
@@ -232,27 +224,10 @@ def fetch_mix_target_records(conn, mix, mixtarget):
             AzureCFD,
             EmbedCls,
             EmbedCt,
-            'readings' AS source_table
-        FROM readings
+            'all_readings' AS source_table
+        FROM all_readings
         WHERE Mix = ? AND MixTarget = ? AND in_use = 1 AND AzureCFD IS NOT NULL
-
-        UNION ALL
-
-        SELECT
-            id,
-            Sample,
-            File,
-            Mix,
-            MixTarget,
-            Target,
-            AzureCls,
-            AzureCFD,
-            EmbedCls,
-            EmbedCt,
-            'test_data' AS source_table
-        FROM test_data
-        WHERE Mix = ? AND MixTarget = ? AND in_use = 1 AND AzureCFD IS NOT NULL
-    """, (mix, mixtarget, mix, mixtarget))
+    """, (mix, mixtarget))
 
     records = [{
         'id': row[0],
@@ -324,9 +299,9 @@ def decorate_graph_container(svg_html, extra_classes='', badge_text=None):
     return decorated
 
 
-def get_azure_records(conn, include_ic=False, compare_embed=False):
+def get_azure_records(conn, include_ic=False, compare_embed=False, mixes=None):
     """
-    Get all records with Azure classification results from BOTH readings and test_data.
+    Get all records with Azure classification results from all_readings table.
 
     When compare_embed=False: Sorted by Mix, MixTarget, AzureCls (1,0,2), AzureCFD
     When compare_embed=True: Sorted by comparison category, Mix, MixTarget, AzureCls, AzureCFD
@@ -334,6 +309,7 @@ def get_azure_records(conn, include_ic=False, compare_embed=False):
     Args:
         include_ic: If False (default), exclude IC (internal control) targets
         compare_embed: If True, order by comparison category first
+        mixes: Optional list of mix names to filter (case-insensitive, uppercased)
 
     Returns:
         List of tuples: (id, Mix, MixTarget, Target, AzureCls, AzureCFD, Sample,
@@ -343,6 +319,12 @@ def get_azure_records(conn, include_ic=False, compare_embed=False):
 
     # Build WHERE clause for IC filtering
     ic_filter = "" if include_ic else "AND MixTarget NOT LIKE '%IC%'"
+
+    # Build WHERE clause for mixes filtering
+    mixes_filter = ""
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        mixes_filter = f"AND Mix IN ({placeholders})"
 
     # Build ORDER BY clause based on compare_embed mode
     if compare_embed:
@@ -382,9 +364,8 @@ def get_azure_records(conn, include_ic=False, compare_embed=False):
             AzureCFD ASC  -- Low confidence first within each class
         """
 
-    # Query both tables and combine results
-    cursor.execute(f"""
-    SELECT * FROM (
+    # Query all_readings table
+    query = f"""
         SELECT
             id,
             Mix,
@@ -398,44 +379,28 @@ def get_azure_records(conn, include_ic=False, compare_embed=False):
             Tube,
             EmbedCls,
             EmbedCt,
-            'readings' as source_table
-        FROM readings
+            'all_readings' as source_table
+        FROM all_readings
         WHERE AzureCls IS NOT NULL
           AND AzureCFD IS NOT NULL
           AND in_use = 1
           {ic_filter}
+          {mixes_filter}
+        {order_by}
+    """
 
-        UNION ALL
-
-        SELECT
-            id,
-            Mix,
-            MixTarget,
-            Target,
-            AzureCls,
-            AzureCFD,
-            Sample,
-            File,
-            FileUID,
-            Tube,
-            EmbedCls,
-            EmbedCt,
-            'test_data' as source_table
-        FROM test_data
-        WHERE AzureCls IS NOT NULL
-          AND AzureCFD IS NOT NULL
-          AND in_use = 1
-          {ic_filter}
-    )
-    {order_by}
-    """)
+    # Execute with mixes parameters if provided
+    if mixes:
+        cursor.execute(query, tuple(mixes))
+    else:
+        cursor.execute(query)
 
     return cursor.fetchall()
 
 
-def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
+def get_ar_records(conn, include_ic=False, compare_embed_ar=False, mixes=None):
     """
-    Get all records with AR (Azure Results) classification results from BOTH readings and test_data.
+    Get all records with AR (Azure Results) classification results from all_readings table.
 
     When compare_embed_ar=False: Sorted by Mix, MixTarget, AR_cls (1,0,2), ar_cfd
     When compare_embed_ar=True: Sorted by comparison category, Mix, MixTarget, AR_cls, ar_cfd
@@ -443,6 +408,7 @@ def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
     Args:
         include_ic: If False (default), exclude IC (internal control) targets
         compare_embed_ar: If True, order by comparison category first
+        mixes: Optional list of mix names to filter (case-insensitive, uppercased)
 
     Returns:
         List of tuples: (id, Mix, MixTarget, Target, ar_cls, ar_cfd, ar_amb, Sample,
@@ -452,6 +418,12 @@ def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
 
     # Build WHERE clause for IC filtering
     ic_filter = "" if include_ic else "AND MixTarget NOT LIKE '%IC%'"
+
+    # Build WHERE clause for mixes filtering
+    mixes_filter = ""
+    if mixes:
+        placeholders = ','.join(['?'] * len(mixes))
+        mixes_filter = f"AND Mix IN ({placeholders})"
 
     # Build ORDER BY clause based on compare_embed_ar mode
     if compare_embed_ar:
@@ -482,10 +454,8 @@ def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
             ar_cfd ASC  -- Low confidence first within each class
         """
 
-    # Query readings table first
-    query_parts = []
-
-    query_parts.append(f"""
+    # Query all_readings table
+    query = f"""
     SELECT
         id,
         Mix,
@@ -500,53 +470,22 @@ def get_ar_records(conn, include_ic=False, compare_embed_ar=False):
         Tube,
         EmbedCls,
         EmbedCt,
-        'readings' as source_table
-    FROM readings
+        'all_readings' as source_table
+    FROM all_readings
     WHERE ar_cls IS NOT NULL
       AND ar_amb IS NOT NULL
       AND ar_cfd IS NOT NULL
       AND in_use = 1
       {ic_filter}
-    """)
+      {mixes_filter}
+    {order_by}
+    """
 
-    # Try to add test_data table if it exists
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='test_data'")
-    has_test_data = cursor.fetchone() is not None
-
-    if has_test_data:
-        query_parts.append(f"""
-    SELECT
-        id,
-        Mix,
-        MixTarget,
-        Target,
-        ar_cls,
-        ar_cfd,
-        ar_amb,
-        Sample,
-        File,
-        FileUID,
-        Tube,
-        EmbedCls,
-        EmbedCt,
-        'test_data' as source_table
-    FROM test_data
-    WHERE ar_cls IS NOT NULL
-      AND ar_amb IS NOT NULL
-      AND ar_cfd IS NOT NULL
-      AND in_use = 1
-      {ic_filter}
-    """)
-
-    # Combine all queries
-    if len(query_parts) > 1:
-        query = " UNION ALL ".join(query_parts)
+    # Execute with mixes parameters if provided
+    if mixes:
+        cursor.execute(query, tuple(mixes))
     else:
-        query = query_parts[0]
-
-    query = f"SELECT * FROM ({query}) {order_by}"
-
-    cursor.execute(query)
+        cursor.execute(query)
     return cursor.fetchall()
 
 
@@ -1237,7 +1176,7 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                 pos_controls = []
                 cursor.execute(f"""
                     SELECT Sample, {readings_select}
-                    FROM test_data
+                    FROM all_readings
                     WHERE Mix = ? AND MixTarget = ? AND (UPPER(Sample) LIKE 'POS%')
                     AND in_use = 1
                     LIMIT 3
@@ -1253,7 +1192,7 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
                 neg_controls = []
                 cursor.execute(f"""
                     SELECT Sample, {readings_select}
-                    FROM test_data
+                    FROM all_readings
                     WHERE Mix = ? AND MixTarget = ? AND (UPPER(Sample) LIKE 'NTC%' OR UPPER(Sample) LIKE 'NPC%' OR UPPER(Sample) LIKE 'NEG%')
                     AND in_use = 1
                     LIMIT 3
@@ -1762,7 +1701,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
         </script>
         <div class="header">
             <h1 class="report-title">AR (Azure Results) Classification Report</h1>
-            <p style="color: #666;">Original curves from readings + test_data tables, organized by Mix, Target, and AR Classification</p>
+            <p style="color: #666;">Original curves from all_readings table, organized by Mix, Target, and AR Classification</p>
             <p style="color: #999; font-size: 0.9em;\">Control curves: <span style="color:#3498db;">━━ Positive</span> | <span style="color:#95a5a6;">··· Negative</span></p>
         </div>
         <div class="container">
@@ -1796,7 +1735,6 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
         'total': 0,
         'by_mix': {},
         'by_cls': {0: 0, 1: 0, 2: 0},
-        'by_table': {'readings': 0, 'test_data': 0},
         'by_comparison': {'DISCREPANT': 0, 'EQUIVOCAL': 0, 'AGREED': 0, 'NO_EMBED': 0}
     }
 
@@ -1813,7 +1751,6 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
         ar_cls_calc = 2 if ar_amb == 1 else ar_cls
         stats['by_cls'][ar_cls_calc] = stats['by_cls'].get(ar_cls_calc, 0) + 1
         stats['by_mix'][mix] = stats['by_mix'].get(mix, 0) + 1
-        stats['by_table'][source_table] += 1
 
         # Calculate comparison category if compare_embed_ar mode is enabled
         comparison_category = None
@@ -2007,10 +1944,6 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
         <div class="stats">
             <h3>Report Statistics</h3>
             <p><strong>Total Records:</strong> {stats['total']}</p>
-            <p><strong>By Source Table:</strong>
-               readings: {stats['by_table']['readings']} |
-               test_data: {stats['by_table']['test_data']}
-            </p>
             <p><strong>By AR Classification:</strong>
                Positive: {stats['by_cls'].get(1, 0)} |
                Negative: {stats['by_cls'].get(0, 0)} |
@@ -2033,7 +1966,6 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
 
     print(f"\nHTML report generated: {output_file}")
     print(f"Total records: {stats['total']}")
-    print(f"  readings: {stats['by_table']['readings']}, test_data: {stats['by_table']['test_data']}")
     print(f"Positive: {stats['by_cls'].get(1, 0)}, Negative: {stats['by_cls'].get(0, 0)}, Ambiguous: {stats['by_cls'].get(2, 0)}")
     if compare_embed_ar:
         print(f"Comparison: Discrepant: {stats['by_comparison']['DISCREPANT']}, Equivocal: {stats['by_comparison']['EQUIVOCAL']}, Agreed: {stats['by_comparison']['AGREED']}, No Embed: {stats['by_comparison']['NO_EMBED']}")
@@ -2360,7 +2292,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         </script>
         <div class="header">
             <h1 class="report-title">Azure Classification Report</h1>
-            <p style="color: #666;">Original curves from readings + test_data tables, organized by Mix, Target, and Classification</p>
+            <p style="color: #666;">Original curves from all_readings table, organized by Mix, Target, and Classification</p>
             <p style="color: #999; font-size: 0.9em;">Control curves: <span style="color:#3498db;">━━ Positive</span> | <span style="color:#95a5a6;">··· Negative</span></p>
         </div>
         <div class="container">
@@ -2394,7 +2326,6 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         'total': 0,
         'by_mix': {},
         'by_cls': {0: 0, 1: 0, 2: 0},
-        'by_table': {'readings': 0, 'test_data': 0},
         'by_comparison': {'DISCREPANT': 0, 'EQUIVOCAL': 0, 'AGREED': 0, 'NO_EMBED': 0}
     }
 
@@ -2409,7 +2340,6 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         stats['total'] += 1
         stats['by_cls'][azure_cls] = stats['by_cls'].get(azure_cls, 0) + 1
         stats['by_mix'][mix] = stats['by_mix'].get(mix, 0) + 1
-        stats['by_table'][source_table] += 1
 
         # Calculate comparison category if compare_embed mode is enabled
         comparison_category = None
@@ -2605,10 +2535,6 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
         <div class="stats">
             <h3>Report Statistics</h3>
             <p><strong>Total Records:</strong> {stats['total']}</p>
-            <p><strong>By Source Table:</strong>
-               readings: {stats['by_table']['readings']} |
-               test_data: {stats['by_table']['test_data']}
-            </p>
             <p><strong>By Classification:</strong>
                Positive: {stats['by_cls'].get(1, 0)} |
                Negative: {stats['by_cls'].get(0, 0)} |
@@ -2631,7 +2557,6 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
 
     print(f"\nHTML report generated: {output_file}")
     print(f"Total records: {stats['total']}")
-    print(f"  readings: {stats['by_table']['readings']}, test_data: {stats['by_table']['test_data']}")
     print(f"Positive: {stats['by_cls'].get(1, 0)}, Negative: {stats['by_cls'].get(0, 0)}, Ambiguous: {stats['by_cls'].get(2, 0)}")
     if compare_embed:
         print(f"Comparison: Discrepant: {stats['by_comparison']['DISCREPANT']}, Equivocal: {stats['by_comparison']['EQUIVOCAL']}, Agreed: {stats['by_comparison']['AGREED']}, No Embed: {stats['by_comparison']['NO_EMBED']}")
@@ -2639,10 +2564,10 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate HTML report of Azure classification results from readings + test_data tables'
+        description='Generate HTML report of Azure classification results from all_readings table'
     )
-    parser.add_argument('--db', default='readings.db',
-                       help='Path to SQLite database file (default: readings.db)')
+    parser.add_argument('--db', default='~/dbs/readings.db',
+                       help='Path to SQLite database file (default: ~/dbs/readings.db)')
     parser.add_argument('--output', default='output_data/azure_report.html',
                        help='Output HTML file path (default: output_data/azure_report.html)')
     parser.add_argument('--show-cfd', action='store_true',
@@ -2664,6 +2589,8 @@ def main():
                        help='Show up to N nearest AzureCFD neighbours (higher/lower) for each sample in sample-details mode')
     parser.add_argument('--baseline', type=int, default=0,
                        help='Normalize curves by dividing by the average of the first N cycles (default: disabled)')
+    parser.add_argument('--mixes',
+                       help='Comma-separated list of mix names to include (default: all mixes)')
 
     args = parser.parse_args()
 
@@ -2671,19 +2598,31 @@ def main():
         print("Error: --baseline must be a non-negative integer")
         sys.exit(1)
 
+    # Parse and normalize mixes list
+    mixes_filter = None
+    if args.mixes:
+        mixes_filter = [m.strip().upper() for m in args.mixes.split(',') if m.strip()]
+        if not mixes_filter:
+            print("Error: --mixes provided but no valid mix names found")
+            sys.exit(1)
+
+    # Expand database path
+    db_path = Path(args.db).expanduser()
+
     # Check if database exists
-    if not Path(args.db).exists():
-        print(f"Error: Database file not found: {args.db}")
+    if not db_path.exists():
+        print(f"Error: Database file not found: {db_path}")
         sys.exit(1)
 
     # Connect to database
-    conn = sqlite3.connect(args.db)
+    conn = sqlite3.connect(str(db_path))
 
     # Sample details mode
     if args.sample_details:
-        print(f"Reading records for samples: {args.sample_details}...")
+        mixes_msg = f" (mixes: {', '.join(mixes_filter)})" if mixes_filter else ""
+        print(f"Reading records for samples: {args.sample_details}{mixes_msg}...")
         include_ic_samples = not args.no_ic
-        records = get_sample_detail_records(conn, args.sample_details, include_ic=include_ic_samples)
+        records = get_sample_detail_records(conn, args.sample_details, include_ic=include_ic_samples, mixes=mixes_filter)
 
         if not records:
             msg = "No records found for samples after applying IC filter." if args.no_ic else f"No records found for samples: {args.sample_details}"
@@ -2707,13 +2646,16 @@ def main():
     else:
         # Standard comparison mode (Azure or AR)
         filter_msg = "" if args.include_ic else " (excluding IC targets)"
+        if mixes_filter:
+            mixes_msg = f" (mixes: {', '.join(mixes_filter)})"
+            filter_msg += mixes_msg
 
         # Determine which mode to use
         use_ar = args.compare_embed_ar
 
         if use_ar:
-            print(f"Reading AR (Azure Results) classification records from both readings and test_data tables{filter_msg}...")
-            records = get_ar_records(conn, include_ic=args.include_ic, compare_embed_ar=args.compare_embed_ar)
+            print(f"Reading AR (Azure Results) classification records from all_readings table{filter_msg}...")
+            records = get_ar_records(conn, include_ic=args.include_ic, compare_embed_ar=args.compare_embed_ar, mixes=mixes_filter)
 
             if not records:
                 print(f"No records with AR classification found in database")
@@ -2734,8 +2676,8 @@ def main():
                 baseline_cycles=args.baseline
             )
         else:
-            print(f"Reading Azure classification records from both readings and test_data tables{filter_msg}...")
-            records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed)
+            print(f"Reading Azure classification records from all_readings table{filter_msg}...")
+            records = get_azure_records(conn, include_ic=args.include_ic, compare_embed=args.compare_embed, mixes=mixes_filter)
 
             if not records:
                 print(f"No records with Azure classification found in database")

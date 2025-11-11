@@ -29,7 +29,7 @@ def parse_args():
                        help='Path to CSV file containing Azure/AR results')
     parser.add_argument('--table', default='readings',
                        choices=['readings', 'test_data', 'flatten', 'flatten_test', 'all_readings'],
-                       help='Table to update (default: readings)')
+                       help='Table to update (default: all_readings)')
     parser.add_argument('--ar-results', action='store_true',
                        help='Import as AR (Azure Results) data instead of Azure data')
     parser.add_argument('--dry-run', action='store_true',

@@ -97,7 +97,7 @@ def get_readings_for_id(conn, target_id):
     cursor = conn.cursor()
     readings_columns = [f"readings{i}" for i in range(44)]
     readings_select = ", ".join(readings_columns)
-    cursor.execute(f"SELECT {readings_select} FROM readings WHERE id = ?", (target_id,))
+    cursor.execute(f"SELECT {readings_select} FROM all_readings WHERE id = ?", (target_id,))
     row = cursor.fetchone()
     if not row:
         return []
@@ -354,30 +354,47 @@ def generate_svg_comparison_graph(record_id, readings, default_values, test_valu
     
     return svg
 
-def get_all_records(conn):
+def get_all_records(conn, mixes_filter=None):
     """Get all records for comparison"""
     cursor = conn.cursor()
-    cursor.execute("""
+
+    query = """
     SELECT id, cusum_min_correct
-    FROM readings 
+    FROM all_readings
     WHERE in_use = 1 AND cusum_min_correct IS NOT NULL
-    ORDER BY cusum_min_correct ASC
-    """)
+    """
+
+    params = []
+    if mixes_filter:
+        placeholders = ','.join(['?'] * len(mixes_filter))
+        query += f" AND Mix IN ({placeholders})"
+        params.extend(mixes_filter)
+
+    query += " ORDER BY cusum_min_correct ASC"
+
+    cursor.execute(query, params)
     return cursor.fetchall()
 
-def get_example_ids(conn):
+def get_example_ids(conn, mixes_filter=None):
     """Get example IDs from database"""
     cursor = conn.cursor()
-    
-    # Get example IDs that exist in the readings table
-    cursor.execute("""
+
+    query = """
     SELECT e.id, r.cusum_min_correct
     FROM example_ids e
-    JOIN readings r ON e.id = r.id
+    JOIN all_readings r ON e.id = r.id
     WHERE r.in_use = 1 AND r.cusum_min_correct IS NOT NULL
-    ORDER BY r.cusum_min_correct ASC
-    """)
-    
+    """
+
+    params = []
+    if mixes_filter:
+        placeholders = ','.join(['?'] * len(mixes_filter))
+        query += f" AND r.Mix IN ({placeholders})"
+        params.extend(mixes_filter)
+
+    query += " ORDER BY r.cusum_min_correct ASC"
+
+    cursor.execute(query, params)
     return cursor.fetchall()
 
 def main():
@@ -420,8 +437,16 @@ def main():
                        help='Use Line of Best Fit gradient check instead of average comparison')
     parser.add_argument('--only-failed', choices=['threshold', 'sanity', 'sanity-lob', 'changes'],
                        help='Filter results: "threshold" = would flatten, "sanity" = sanity failures, "sanity-lob" = LOB sanity failures, "changes" = flattening decision changes (default behavior)')
-    
+    parser.add_argument('--mixes', type=str,
+                       help='Comma-separated list of mix names to include (default: all mixes)')
+
     args = parser.parse_args()
+
+    # Parse mixes filter
+    mixes_filter = None
+    if args.mixes:
+        mixes_filter = [mix.strip().upper() for mix in args.mixes.split(',')]
+        print(f"Filtering to mixes: {', '.join(mixes_filter)}")
     
     # Handle alias --k for --test-k
     if args.k is not None:
@@ -475,24 +500,36 @@ def main():
     # Determine which records to process
     if args.example_dataset:
         print("Using example dataset from feedback plots...")
-        records = get_example_ids(conn)
+        records = get_example_ids(conn, mixes_filter)
         file_type = "Example Dataset"
     elif args.ids:
         print(f"Processing specific IDs: {args.ids}")
         id_list = [int(x.strip()) for x in args.ids.split(',')]
         cursor = conn.cursor()
-        placeholders = ','.join(['?'] * len(id_list))
-        cursor.execute(f"""
+
+        query = """
         SELECT id, cusum_min_correct
-        FROM readings 
-        WHERE id IN ({placeholders}) AND in_use = 1 AND cusum_min_correct IS NOT NULL
-        ORDER BY cusum_min_correct ASC
-        """, id_list)
+        FROM all_readings
+        WHERE id IN ({id_placeholders}) AND in_use = 1 AND cusum_min_correct IS NOT NULL
+        """
+
+        params = id_list.copy()
+        id_placeholders = ','.join(['?'] * len(id_list))
+
+        if mixes_filter:
+            mix_placeholders = ','.join(['?'] * len(mixes_filter))
+            query += f" AND Mix IN ({mix_placeholders})"
+            params.extend(mixes_filter)
+
+        query += " ORDER BY cusum_min_correct ASC"
+        query = query.format(id_placeholders=id_placeholders)
+
+        cursor.execute(query, params)
         records = cursor.fetchall()
         file_type = "Custom IDs"
     else:
         print("Processing all records...")
-        records = get_all_records(conn)
+        records = get_all_records(conn, mixes_filter)
         file_type = "All Records"
     
     # Apply sorting if needed
@@ -537,7 +574,7 @@ def main():
                 cursor = conn.cursor()
                 cusum_columns = [f"cusum{j}" for j in range(len(readings))]
                 cusum_select = ", ".join(cusum_columns)
-                cursor.execute(f"SELECT {cusum_select} FROM readings WHERE id = ?", (record_id,))
+                cursor.execute(f"SELECT {cusum_select} FROM all_readings WHERE id = ?", (record_id,))
                 cusum_row = cursor.fetchone()
                 default_values = [bytes_to_float(val) for val in cusum_row if val is not None][:len(readings)]
             else:
