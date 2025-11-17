@@ -421,15 +421,28 @@ def get_example_ids(conn, sort_order='down', mixes=None):
     # Convert bytes to float for cusum_min_correct
     return [(id, bytes_to_float(cusum_min)) for id, cusum_min in cursor.fetchall()]
 
-def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None):
-    """Get example IDs with flexible sorting options"""
+def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None, filter_mix_target=False):
+    """
+    Get example IDs with flexible sorting options.
+
+    Args:
+        conn: Database connection
+        sort_by: 'id' or 'db-cusum'
+        sort_order: 'up' or 'down'
+        mixes: List of mix names to filter by (applied to all_readings)
+        filter_mix_target: If True, filter by mix/target stored in example_ids table
+
+    Returns:
+        List of tuples (id, cusum_min_correct)
+    """
     cursor = conn.cursor()
 
     # First check if example_ids table exists
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='example_ids'")
     if not cursor.fetchone():
         print("Creating example_ids table...")
-        cursor.execute("CREATE TABLE example_ids (id INTEGER PRIMARY KEY)")
+        cursor.execute("CREATE TABLE example_ids (id INTEGER PRIMARY KEY, mix TEXT NULL, target TEXT NULL)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_example_ids_mix_target ON example_ids(id, mix, target)")
 
         # Insert the example IDs from feedback plots + 2112 (key test case)
         example_ids = [3, 8, 9, 10, 20, 30, 33, 38, 49, 59, 60, 199, 203, 206, 367, 386,
@@ -437,7 +450,7 @@ def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None):
                       1782, 1825, 1862, 1877, 2112, 2300, 2304]
 
         for example_id in example_ids:
-            cursor.execute("INSERT INTO example_ids (id) VALUES (?)", (example_id,))
+            cursor.execute("INSERT INTO example_ids (id, mix, target) VALUES (?, NULL, NULL)", (example_id,))
 
         conn.commit()
         print(f"Populated example_ids table with {len(example_ids)} IDs")
@@ -453,6 +466,18 @@ def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None):
 
     where_clause = " AND ".join(where_clauses)
 
+    # Build JOIN condition based on filter_mix_target flag
+    if filter_mix_target:
+        # Filter by mix/target stored in example_ids (only if NOT NULL)
+        join_condition = """
+        e.id = r.id
+        AND (e.mix IS NULL OR e.mix = r.Mix)
+        AND (e.target IS NULL OR e.target = r.MixTarget)
+        """
+    else:
+        # Simple join by ID only (ignore mix/target columns)
+        join_condition = "e.id = r.id"
+
     # Determine sort column and order
     if sort_by == 'id':
         sort_col = "e.id"
@@ -464,7 +489,7 @@ def get_example_ids_by_sort(conn, sort_by, sort_order='down', mixes=None):
     query = f"""
     SELECT e.id, r.cusum_min_correct
     FROM example_ids e
-    JOIN all_readings r ON e.id = r.id
+    JOIN all_readings r ON {join_condition}
     WHERE {where_clause}
     ORDER BY {sort_col} {order_sql}
     """
@@ -647,6 +672,8 @@ def main():
                        help='Comma-separated list of specific IDs to process')
     parser.add_argument('--example-dataset', action='store_true',
                        help='Use example dataset from feedback plots')
+    parser.add_argument('--example-ids-mix-target', action='store_true',
+                       help='Filter example dataset by mix/target stored in example_ids table (requires --example-dataset)')
     parser.add_argument('--all', action='store_true',
                        help='Process all records (alternative to --ids/--example-dataset)')
     parser.add_argument('--limit', type=int,
@@ -745,9 +772,12 @@ def main():
     else:
         # For k=0.0 with CUSUM sorting, or any k with db-cusum/id sorting (fast database sorting)
         if args.example_dataset:
-            print("Using example dataset from feedback plots...")
-            records = get_example_ids_by_sort(conn, args.sort_by, args.sort_order, mixes_list)
-            file_type = "Example Dataset"
+            if args.example_ids_mix_target:
+                print("Using example dataset filtered by mix/target from example_ids table...")
+            else:
+                print("Using example dataset from feedback plots...")
+            records = get_example_ids_by_sort(conn, args.sort_by, args.sort_order, mixes_list, args.example_ids_mix_target)
+            file_type = "Example Dataset (Mix/Target Filtered)" if args.example_ids_mix_target else "Example Dataset"
         elif args.ids:
             print(f"Processing specific IDs: {args.ids}")
             id_list = [int(x.strip()) for x in args.ids.split(',')]

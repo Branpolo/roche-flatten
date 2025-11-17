@@ -63,6 +63,7 @@ python3 flatten/create_flattened_database_fast.py --sanity-check-slope --thresho
 - `--k [number]`: CUSUM tolerance parameter (default: 0.0, suggested: 0.1-0.3)
 - `--ids [id1,id2,...]`: Process specific record IDs
 - `--example-dataset`: Use curated example dataset from feedback plots
+- `--example-ids-mix-target`: Filter example dataset by mix/target stored in example_ids table (requires --example-dataset)
 - `--limit [n]`: Limit number of curves to process
 - `--threshold [n]`: CUSUM threshold for flattening (default: -80)
 - `--sanity-check-slope`: Enable sanity check to verify CUSUM min represents actual decrease
@@ -87,6 +88,9 @@ python3 flatten/generate_flattened_cusum_html.py --sanity-check-slope --only-fai
 
 # Use Line of Best Fit gradient check
 python3 flatten/generate_flattened_cusum_html.py --sanity-lob --example-dataset --threshold -50
+
+# Filter example dataset by mix/target combinations stored in example_ids
+python3 flatten/generate_flattened_cusum_html.py --example-dataset --example-ids-mix-target --limit 10
 ```
 
 **Output**: HTML files in `output_data/` with interactive graphs showing original (blue), flattened (green), and CUSUM (red dashed) curves
@@ -112,28 +116,37 @@ python3 flatten/generate_database_flattened_html_fixed.py
 ---
 
 ### 5. `manage_example_ids.py` 🆕
-**Purpose**: Manage the example IDs dataset used for testing and validation
+**Purpose**: Manage the example IDs dataset used for testing and validation with optional mix/target filtering
 
 **Parameters**:
-- `--add [id1,id2,...]`: Add IDs to the example dataset
+- `--add [specs]`: Add IDs to the example dataset. Supports formats:
+  - Simple IDs: `100,200,300`
+  - With mix/target: `100:ENT:Ent,200:RUM:Measles,300`
 - `--remove [id1,id2,...]`: Remove IDs from the example dataset
-- `--list`: List all current example IDs (default action)
-- `--validate`: Check if IDs exist in readings table before adding
+- `--update [specs]`: Update mix/target for existing IDs. Format: `100:ENT:Ent,200:RUM:Measles`
+- `--list`: List all current example IDs with mix/target info (default action)
+- `--validate`: Check if IDs (and mix/target combinations) exist in all_readings table
 - `--db [path]`: Path to database file (default: ~/dbs/readings.db)
 
 **Usage Examples**:
 ```bash
-# List current example IDs
+# List current example IDs with mix/target information
 python3 flatten/manage_example_ids.py --list
 
-# Add new IDs to example dataset
+# Add simple IDs to example dataset
 python3 flatten/manage_example_ids.py --add 500,600,700
+
+# Add IDs with specific mix/target combinations
+python3 flatten/manage_example_ids.py --add "2112:BKV:BK,3:ENT:Ent" --validate
+
+# Update mix/target for existing IDs
+python3 flatten/manage_example_ids.py --update "2112:BKV:BK,3:ENT:Ent" --validate
 
 # Remove IDs from example dataset
 python3 flatten/manage_example_ids.py --remove 500,600
 ```
 
-**Output**: Console output showing added/removed/listed IDs
+**Output**: Console output showing added/removed/updated/listed IDs with mix/target information
 
 ---
 
