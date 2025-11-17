@@ -135,7 +135,7 @@ def get_control_curves(conn, file_uid, mix, mixtarget, control_samples, is_posit
     return controls
 
 
-def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None):
+def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None, mix_target_constraints=None):
     """
     Get all records for specified samples with Azure and Embed results.
 
@@ -147,6 +147,8 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None):
         sample_ids: List of sample IDs to retrieve
         include_ic: Include IC targets when True (default), otherwise drop IC entries
         mixes: Optional list of mix names to filter (case-insensitive, uppercased)
+        mix_target_constraints: Optional list of (sample, mix, target) tuples for filtering
+                              specific mix/target combinations per sample
 
     Returns:
         List of tuples: (id, Sample, File, Mix, MixTarget, Target, AzureCls, AzureCFD,
@@ -168,6 +170,23 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None):
         placeholders = ','.join(['?'] * len(mixes))
         mixes_filter = f"AND Mix IN ({placeholders})"
 
+    # Build mix/target constraints filter
+    mix_target_filter = ""
+    if mix_target_constraints:
+        # Create OR conditions for each (sample, mix, target) combination
+        conditions = []
+        for sample, mix, target in mix_target_constraints:
+            if mix is None and target is None:
+                # NULL mix/target = match any for this sample
+                conditions.append(f"Sample = '{sample}'")
+            elif mix is not None and target is None:
+                conditions.append(f"(Sample = '{sample}' AND Mix = '{mix}')")
+            elif mix is None and target is not None:
+                conditions.append(f"(Sample = '{sample}' AND MixTarget = '{target}')")
+            else:
+                conditions.append(f"(Sample = '{sample}' AND Mix = '{mix}' AND MixTarget = '{target}')")
+        mix_target_filter = "AND (" + " OR ".join(conditions) + ")"
+
     # Query all_readings table with all targets (including IC by default), skip E1/E2
     query = f"""
         SELECT
@@ -188,6 +207,7 @@ def get_sample_detail_records(conn, sample_ids, include_ic=True, mixes=None):
           AND MixTarget NOT IN ('E1', 'E2')
           {ic_filter}
           {mixes_filter}
+          {mix_target_filter}
         ORDER BY
             Sample,
             File,
@@ -2601,6 +2621,10 @@ def main():
                        help='Group results by comparison between AR (Azure Results) and embedded machine classifications (DISCREPANT/EQUIVOCAL/AGREED)')
     parser.add_argument('--sample-details', nargs='+', type=int,
                        help='Generate sample details report for specific sample IDs (includes IC targets unless --no-ic is used)')
+    parser.add_argument('--example-dataset', action='store_true',
+                       help='Use example dataset from example_ids table instead of --sample-details')
+    parser.add_argument('--example-ids-mix-target', action='store_true',
+                       help='Filter example dataset by mix/target stored in example_ids table (requires --example-dataset)')
     parser.add_argument('--no-ic', action='store_true',
                        help='When used with --sample-details, exclude IC targets from the output')
     parser.add_argument('--dont-scale-y', action='store_true',
@@ -2639,19 +2663,75 @@ def main():
     conn = sqlite3.connect(str(db_path))
 
     # Sample details mode
-    if args.sample_details:
+    if args.sample_details or args.example_dataset:
+        # Determine which samples to use
+        example_id_constraints = None  # Will hold list of (sample, mix, target) tuples for filtering
+
+        if args.example_dataset:
+            # Load from example_ids table
+            cursor = conn.cursor()
+
+            # Build query based on mix/target filtering
+            if args.example_ids_mix_target:
+                print("Loading example dataset with mix/target filtering...")
+                # Get specific (sample, mix, target) combinations from example_ids
+                # ONLY include records where mix/target are explicitly set (not NULL)
+                query = """
+                    SELECT DISTINCT r.Sample, e.mix, e.target
+                    FROM example_ids e
+                    JOIN all_readings r ON e.id = r.id
+                    WHERE r.in_use = 1
+                      AND e.mix IS NOT NULL
+                      AND e.target IS NOT NULL
+                """
+                cursor.execute(query)
+                rows = cursor.fetchall()
+
+                # Store constraints for filtering
+                example_id_constraints = [(row[0], row[1], row[2]) for row in rows]
+                sample_ids = list(set(row[0] for row in rows))  # Unique samples
+
+                if not sample_ids:
+                    print("No samples found in example_ids table")
+                    conn.close()
+                    sys.exit(1)
+
+                print(f"Found {len(sample_ids)} unique samples from example_ids table")
+                print(f"With {len(example_id_constraints)} specific mix/target combinations")
+            else:
+                print("Loading example dataset (all mix/target combinations)...")
+                # Just get samples for the IDs in example_ids
+                query = """
+                    SELECT DISTINCT r.Sample
+                    FROM example_ids e
+                    JOIN all_readings r ON e.id = r.id
+                    WHERE r.in_use = 1
+                """
+                cursor.execute(query)
+                sample_ids = [row[0] for row in cursor.fetchall()]
+
+                if not sample_ids:
+                    print("No samples found in example_ids table")
+                    conn.close()
+                    sys.exit(1)
+
+                print(f"Found {len(sample_ids)} unique samples from example_ids table")
+        else:
+            sample_ids = args.sample_details
+
         mixes_msg = f" (mixes: {', '.join(mixes_filter)})" if mixes_filter else ""
-        print(f"Reading records for samples: {args.sample_details}{mixes_msg}...")
+        print(f"Reading records for samples: {sample_ids}{mixes_msg}...")
         include_ic_samples = not args.no_ic
-        records = get_sample_detail_records(conn, args.sample_details, include_ic=include_ic_samples, mixes=mixes_filter)
+        records = get_sample_detail_records(conn, sample_ids, include_ic=include_ic_samples, mixes=mixes_filter,
+                                           mix_target_constraints=example_id_constraints)
 
         if not records:
-            msg = "No records found for samples after applying IC filter." if args.no_ic else f"No records found for samples: {args.sample_details}"
+            msg = "No records found for samples after applying IC filter." if args.no_ic else f"No records found for samples: {sample_ids}"
             print(msg)
             conn.close()
             sys.exit(1)
 
-        print(f"Found {len(records)} records for {len(args.sample_details)} samples")
+        print(f"Found {len(records)} records for {len(sample_ids)} samples")
 
         # Generate sample details report
         scale_y_axis = not args.dont_scale_y
