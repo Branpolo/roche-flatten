@@ -580,18 +580,45 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
     if not processed_readings or len(processed_readings) < 2:
         return f'<div style="color: red;">No data for ID {record_id}</div>'
 
-    main_min = min(processed_readings)
-    main_max = max(processed_readings)
-    value_range = main_max - main_min
+    # Prepare control readings (apply baseline once and cache for scaling)
+    control_sets = []
+    if pos_controls:
+        normalized_pos = []
+        for sample_name, ctrl_readings in pos_controls:
+            ctrl_processed = apply_baseline(ctrl_readings, baseline_cycles) if baseline_cycles > 0 else ctrl_readings
+            normalized_pos.append((sample_name, ctrl_processed))
+            if ctrl_processed:
+                control_sets.append(ctrl_processed)
+        pos_controls = normalized_pos
+
+    if neg_controls:
+        normalized_neg = []
+        for sample_name, ctrl_readings in neg_controls:
+            ctrl_processed = apply_baseline(ctrl_readings, baseline_cycles) if baseline_cycles > 0 else ctrl_readings
+            normalized_neg.append((sample_name, ctrl_processed))
+            if ctrl_processed:
+                control_sets.append(ctrl_processed)
+        neg_controls = normalized_neg
+
+    min_values = [min(processed_readings)]
+    max_values = [max(processed_readings)]
+    for ctrl in control_sets:
+        if ctrl:
+            min_values.append(min(ctrl))
+            max_values.append(max(ctrl))
+
+    combined_min = min(min_values)
+    combined_max = max(max_values)
+    value_range = combined_max - combined_min
 
     if value_range == 0:
-        adjustment = max(abs(main_max) * 0.1, 1)
-        min_display = main_min - (adjustment / 2)
-        max_display = main_max + (adjustment / 2)
+        adjustment = max(abs(combined_max) * 0.1, 1)
+        min_display = combined_min - (adjustment / 2)
+        max_display = combined_max + (adjustment / 2)
     else:
         padding = value_range * padding_ratio
-        min_display = main_min - padding
-        max_display = main_max + padding
+        min_display = combined_min - padding
+        max_display = combined_max + padding
 
     reading_range = max(max_display - min_display, 1e-6)
 
@@ -643,28 +670,22 @@ def generate_svg_graph(record_id, readings, metadata, width=240, height=180, sho
 
     # Positive controls (blue, dashed)
     if pos_controls:
-        if baseline_cycles > 0:
-            pos_controls = [(sample_name, apply_baseline(ctrl_readings, baseline_cycles))
-                            for sample_name, ctrl_readings in pos_controls]
         for sample_name, ctrl_readings in pos_controls:
             polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#3498db" stroke-width="1.5"
-                      stroke-dasharray="5,3" class="control-curve hidden" data-control-type="positive"
+                      stroke-dasharray="5,3" class="control-curve" data-control-type="positive"
                       data-readings="{format_readings(ctrl_readings)}"/>
             '''
         legend_items.append('<span style="color:#3498db;">━━ Pos Ctrl</span>')
 
     # Negative controls (gray, dotted)
     if neg_controls:
-        if baseline_cycles > 0:
-            neg_controls = [(sample_name, apply_baseline(ctrl_readings, baseline_cycles))
-                            for sample_name, ctrl_readings in neg_controls]
         for sample_name, ctrl_readings in neg_controls:
             polyline = generate_polyline(ctrl_readings, min_display, reading_range)
             control_polylines += f'''
             <polyline points="{polyline}" fill="none" stroke="#95a5a6" stroke-width="1.5"
-                      stroke-dasharray="2,2" class="control-curve hidden" data-control-type="negative"
+                      stroke-dasharray="2,2" class="control-curve" data-control-type="negative"
                       data-readings="{format_readings(ctrl_readings)}"/>
             '''
         legend_items.append('<span style="color:#95a5a6;">··· Neg Ctrl</span>')
@@ -1156,7 +1177,7 @@ def generate_sample_details_report(conn, records, output_file, show_cfd=False, s
             html_content += f'''
             <h4 style="position: relative;">
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h4>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -1775,8 +1796,8 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 category_counter += 1
                 comp_label = comparison_labels.get(comparison_category, comparison_category)
 
-                # Hide AGREED and beyond by default
-                if category_counter >= 3:
+                # Collapse equivocal results by default, keep others expanded
+                if comparison_category == 'EQUIVOCAL':
                     section_style = 'display: none;'
                     header_class = ' collapsed'
                 else:
@@ -1813,7 +1834,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 html_content += f'''
             <h3>
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -1861,7 +1882,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 html_content += f'''
             <h3>
                 {cls_label}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -2368,8 +2389,8 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 category_counter += 1
                 comp_label = comparison_labels.get(comparison_category, comparison_category)
 
-                # Hide AGREED (3rd category) and beyond by default
-                if category_counter >= 3:
+                # Collapse equivocal results by default, keep others expanded
+                if comparison_category == 'EQUIVOCAL':
                     section_style = 'display: none;'
                     header_class = ' collapsed'
                 else:
@@ -2406,7 +2427,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 Target: {mixtarget}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
@@ -2454,7 +2475,7 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 html_content += f'''
             <h3>
                 {cls_label}
-                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Show Controls</button>
+                <button class="toggle-controls-btn" onclick="toggleControls('{section_id}', SCALE_Y_AXIS_ON_TOGGLE)">Hide Controls</button>
             </h3>
             <div id="{section_id}" style="display: contents;">
             '''
