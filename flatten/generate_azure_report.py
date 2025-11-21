@@ -1804,6 +1804,11 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
 
             # Add Comparison Category header (h1) when it changes
             if comparison_category != current_comparison_category:
+                # Close any open sub-sections from the previous category
+                if current_ar_cls is not None:
+                    html_content += '</div>\n'
+                    current_ar_cls = None
+                    current_mixtarget = None
                 # Close previous category section div if exists
                 if current_comparison_category is not None:
                     html_content += '</div>\n'  # Close previous category-section
@@ -2397,6 +2402,12 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
 
             # Add Comparison Category header (h1) when it changes
             if comparison_category != current_comparison_category:
+                # Close any open sub-sections from the previous category
+                if current_azurecls is not None:
+                    html_content += '</div>\n'
+                    current_azurecls = None
+                if current_mixtarget is not None:
+                    current_mixtarget = None
                 # Close previous category section div if exists
                 if current_comparison_category is not None:
                     html_content += '</div>\n'  # Close previous category-section
