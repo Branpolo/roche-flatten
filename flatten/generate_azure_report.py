@@ -1816,8 +1816,8 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
                 category_counter += 1
                 comp_label = comparison_labels.get(comparison_category, comparison_category)
 
-                # Collapse equivocal results by default, keep others expanded
-                if comparison_category == 'EQUIVOCAL':
+                # Collapse Equivocal/Agreed buckets by default, keep others expanded
+                if comparison_category in ('EQUIVOCAL', 'AGREED'):
                     section_style = 'display: none;'
                     header_class = ' collapsed'
                 else:
@@ -2409,8 +2409,8 @@ def generate_html_report(conn, records, output_file, show_cfd=False, compare_emb
                 category_counter += 1
                 comp_label = comparison_labels.get(comparison_category, comparison_category)
 
-                # Collapse equivocal results by default, keep others expanded
-                if comparison_category == 'EQUIVOCAL':
+                # Collapse Equivocal/Agreed buckets by default, keep others expanded
+                if comparison_category in ('EQUIVOCAL', 'AGREED'):
                     section_style = 'display: none;'
                     header_class = ' collapsed'
                 else:
