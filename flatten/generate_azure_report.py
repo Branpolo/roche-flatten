@@ -1964,7 +1964,7 @@ def generate_html_report_ar(conn, records, output_file, show_cfd=False, compare_
 
     # Close last category section div
     if compare_embed_ar and current_comparison_category is not None:
-        html_content += '</div>\n'  # Close category-section
+        html_content += '</div></div>\n'  # Close category-section
 
     # Build statistics HTML
     stats_comparison_html = ''
